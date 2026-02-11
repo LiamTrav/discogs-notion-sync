@@ -72,17 +72,9 @@ def notion_page_exists(discogs_id):
 def create_notion_entry(release):
     info = release["basic_information"]
 
-    artist = info["artists"][0]["name"]
     title = info["title"]
-    year = info.get("year")
-    label = info["labels"][0]["name"] if info.get("labels") else None
-    country = info.get("country")
-    formats = info.get("formats", [])
-
-    format_size = formats[0].get("name") if formats else None
-    format_details = ", ".join(formats[0].get("descriptions", [])) if formats else None
-
-    added_date = release.get("date_added")
+    artist = info["artists"][0]["name"]
+    discogs_id = release["id"]
 
     data = {
         "parent": {"database_id": DATABASE_ID},
@@ -93,33 +85,10 @@ def create_notion_entry(release):
             "Artist": {
                 "rich_text": [{"text": {"content": artist}}]
             },
-            "Year": {
-                "number": year
-            },
             "Discogs ID": {
-                "number": release["id"]
-            },
-            "Label": {
-                "rich_text": [{"text": {"content": label}}] if label else {"rich_text": []}
-            },
-            "Country": {
-                "select": {"name": country} if country else None
-            },
-            "FormatSize": {
-                "select": {"name": format_size} if format_size else None
-            },
-            "FormatDetails": {
-                "rich_text": [{"text": {"content": format_details}}] if format_details else {"rich_text": []}
-            },
-            "Added": {
-                "date": {"start": added_date} if added_date else None
+                "number": discogs_id
             }
         }
-    }
-
-    # Remove null properties (Notion rejects them)
-    data["properties"] = {
-        k: v for k, v in data["properties"].items() if v is not None
     }
 
     response = requests.post(
