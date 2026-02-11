@@ -52,9 +52,15 @@ def notion_page_exists(discogs_id):
     }
 
     response = requests.post(url, headers=headers_notion, json=payload)
-    results = response.json()["results"]
 
-    return results[0]["id"] if results else None
+    if response.status_code != 200:
+        print("Notion query failed:")
+        print(response.status_code)
+        print(response.text)
+        return None
+
+    data = response.json()
+    return data["results"][0]["id"] if data["results"] else None
 
 
 def create_notion_entry(release):
