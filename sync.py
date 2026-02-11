@@ -27,6 +27,12 @@ def get_discogs_collection():
         url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
         response = requests.get(url, headers=headers_discogs)
         data = response.json()
+        if response.status_code != 200:
+            print("Discogs API failed:")
+            print(response.status_code)
+            print(response.text)
+            exit(1)
+
 
         releases.extend(data["releases"])
 
