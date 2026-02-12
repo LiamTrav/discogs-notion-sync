@@ -1,6 +1,6 @@
 import os
 import requests
-from requests.auth import HTTPBasicAuth
+import re
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -22,12 +22,56 @@ def get_discogs_release(discogs_id):
     return response.json()
 
 
-def update_page(notion_id, country):
+def parse_format_details(format_list):
+    """
+    Take Discogs 'formats' list and extract:
+    - size (7", 12")
+    - speed (45 RPM, 33 RPM, etc.)
+    - remaining details (e.g. Single, Promo)
+    """
+    if not format_list:
+        return "", "", ""
+
+    # Sometimes multiple formats exist; just take the first one
+    fmt = format_list[0]
+    descriptions = fmt.get("descriptions", [])  # e.g., ["Single", "Promo"]
+    text_parts = []
+
+    # Extract size
+    size = ""
+    if "format" in fmt:
+        size_match = re.search(r'(\d+\"|\d+ inch)', fmt["format"])
+        if size_match:
+            size = size_match.group(1)
+
+    # Extract speed
+    speed = ""
+    if "text" in fmt:
+        speed_match = re.search(r'(\d+\s*RPM)', fmt["text"], re.IGNORECASE)
+        if speed_match:
+            speed = speed_match.group(1)
+
+    # Build remaining details
+    for desc in descriptions:
+        if desc.upper() != "PROMO":  # leave everything except Promo
+            text_parts.append(desc)
+    # Include text field except for speed
+    if "text" in fmt:
+        remaining = re.sub(r'\d+\s*RPM', '', fmt["text"], flags=re.IGNORECASE).strip()
+        if remaining:
+            text_parts.append(remaining)
+
+    details = ", ".join(text_parts)
+    return size, speed, details
+
+
+def update_page(notion_id, country, format_size, format_speed, format_details):
     data = {
         "properties": {
-            "Country": {
-                "rich_text": [{"text": {"content": country or ""}}]
-            }
+            "Country": {"rich_text": [{"text": {"content": country or ""}}]},
+            "FormatSize": {"rich_text": [{"text": {"content": format_size or ""}}]},
+            "FormatSpeed": {"rich_text": [{"text": {"content": format_speed or ""}}]},
+            "FormatDetails": {"rich_text": [{"text": {"content": format_details or ""}}]},
         }
     }
     response = requests.patch(f"{NOTION_API_URL}/{notion_id}", headers=NOTION_HEADERS, json=data)
@@ -36,7 +80,6 @@ def update_page(notion_id, country):
 
 
 def main():
-    # Get all pages from the database
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     has_more = True
     next_cursor = None
@@ -52,7 +95,7 @@ def main():
         for page in data.get("results", []):
             notion_id = page["id"]
             discogs_id_prop = page["properties"].get("Discogs ID", {})
-            discogs_id = discogs_id_prop.get("number")  # Adjust if needed based on your property type
+            discogs_id = discogs_id_prop.get("number")  # Adjust if your property type differs
 
             if not discogs_id:
                 print(f"Skipping page {notion_id} (no Discogs ID)")
@@ -61,7 +104,13 @@ def main():
             try:
                 release = get_discogs_release(discogs_id)
                 country = release.get("country")
-                update_page(notion_id, country)
+
+                # Parse format details
+                format_list = release.get("formats", [])
+                fmt_size, fmt_speed, fmt_details = parse_format_details(format_list)
+
+                update_page(notion_id, country, fmt_size, fmt_speed, fmt_details)
+
             except requests.exceptions.HTTPError as e:
                 print(f"Failed to fetch release {discogs_id}: {e}")
 
