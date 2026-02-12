@@ -93,7 +93,6 @@ def safe_select(value):
 def update_page(page_id, properties):
     """Update a Notion page with given properties."""
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    # Remove any None values to avoid 400 errors
     filtered_props = {k: v for k, v in properties.items() if v is not None}
     if not filtered_props:
         return
@@ -133,7 +132,7 @@ def main():
         # Build properties payload
         properties = {
             "Title": safe_rich_text(release.get("title")),
-            "Country": safe_rich_text(release.get("country")),
+            "Country": release.get("country"),  # now a text property
             "Folder": safe_select(release.get("folder_name")),
             "ValueLow": safe_number(release.get("value_low")),
             "ValueMid": safe_number(release.get("value_mid")),
@@ -144,7 +143,4 @@ def main():
         }
 
         update_page(notion_id, properties)
-        time.sleep(1)  # throttle to avoid Discogs API limits
-
-if __name__ == "__main__":
-    main()
+        time.sleep(1)  # thro
