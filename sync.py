@@ -154,6 +154,8 @@ properties["Notes"] = {
         }
     ]
 }
+}
+}
 
     # Remove null properties
     data["properties"] = {k: v for k, v in data["properties"].items() if v is not None}
