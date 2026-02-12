@@ -25,7 +25,10 @@ headers_notion = {
 def get_discogs_collection():
     releases = []
     page = 1
+
     while True:
+        print(f"Fetching page {page}...")
+
         url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
         response = requests.get(url, headers=headers_discogs)
 
@@ -36,10 +39,15 @@ def get_discogs_collection():
             exit(1)
 
         data = response.json()
-        releases.extend(data.get("releases", []))
+        page_releases = data.get("releases", [])
 
-        if page >= data.get("pagination", {}).get("pages", 0):
+        if not page_releases:
+            print("No more releases found. Stopping.")
             break
+
+        releases.extend(page_releases)
+
+        print(f"Collected so far: {len(releases)}")
 
         page += 1
         time.sleep(1)
