@@ -26,7 +26,26 @@ def get_discogs_collection():
     releases = []
     page = 1
 
-    while True:
+    # First request to get total pages
+    url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/0/releases?page=1&per_page=100"
+    response = requests.get(url, headers=headers_discogs)
+
+    if response.status_code != 200:
+        print("Discogs API failed:")
+        print(response.status_code)
+        print(response.text)
+        exit(1)
+
+    data = response.json()
+    total_pages = data.get("pagination", {}).get("pages", 1)
+
+    print(f"Total pages: {total_pages}")
+
+    releases.extend(data.get("releases", []))
+    print(f"Collected page 1 ({len(releases)} releases)")
+
+    # Fetch remaining pages
+    for page in range(2, total_pages + 1):
         print(f"Fetching page {page}...")
 
         url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
@@ -39,17 +58,10 @@ def get_discogs_collection():
             exit(1)
 
         data = response.json()
-        page_releases = data.get("releases", [])
-
-        if not page_releases:
-            print("No more releases found. Stopping.")
-            break
-
-        releases.extend(page_releases)
+        releases.extend(data.get("releases", []))
 
         print(f"Collected so far: {len(releases)}")
 
-        page += 1
         time.sleep(1)
 
     return releases
