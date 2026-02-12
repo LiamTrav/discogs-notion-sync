@@ -1,112 +1,130 @@
-import re
+import requests
+import os
 import time
-from notion_client import Client
-import discogs_client
 
-# --- CONFIG ---
-NOTION_TOKEN = "YOUR_NOTION_TOKEN"
-NOTION_DATABASE_ID = "YOUR_DATABASE_ID"
-DISCOGS_TOKEN = "YOUR_DISCOGS_TOKEN"
+# Environment variables
+DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
+NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
+USERNAME = os.environ["DISCOGS_USERNAME"]
 
-# --- INIT CLIENTS ---
-notion = Client(auth=NOTION_TOKEN)
-discogs = discogs_client.Client('discogs-notion-sync', user_token=DISCOGS_TOKEN)
+# Headers
+HEADERS_NOTION = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Content-Type": "application/json",
+    "Notion-Version": "2022-06-28"
+}
 
-# --- HELPERS ---
-def split_format_details(details):
-    size = speed = ""
+HEADERS_DISCOGS = {
+    "Authorization": f"Discogs token={DISCOGS_TOKEN}",
+    "User-Agent": f"{USERNAME}-Discogs-Notion-Sync/1.0"
+}
+
+def get_notion_pages():
+    """Retrieve all pages from the Notion database."""
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+    results = []
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        payload = {"page_size": 100}
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+        response = requests.post(url, headers=HEADERS_NOTION, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        results.extend(data["results"])
+        has_more = data.get("has_more", False)
+        start_cursor = data.get("next_cursor")
+    return results
+
+def get_discogs_release(release_id):
+    url = f"https://api.discogs.com/releases/{release_id}"
+    response = requests.get(url, headers=HEADERS_DISCOGS)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.json()
+
+def parse_format_details(details):
+    """Split FormatDetails into FormatSize, FormatSpeed, and remaining details."""
+    size = None
+    speed = None
     remaining = []
-    if details:
-        parts = [p.strip() for p in details.split(",")]
-        for part in parts:
-            if re.match(r'^\d+"$', part):
-                size = part
-            elif re.match(r'^\d+\s*RPM$', part, re.IGNORECASE):
-                speed = part
-            else:
-                remaining.append(part)
+    for part in details.split(","):
+        part = part.strip()
+        if '"' in part or "in" in part:
+            size = part
+        elif "RPM" in part.upper():
+            speed = part
+        else:
+            remaining.append(part)
     return size, speed, ", ".join(remaining)
 
-def safe_number(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0
+def update_notion_page(page_id, properties):
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    payload = {"properties": properties}
+    response = requests.patch(url, headers=HEADERS_NOTION, json=payload)
+    response.raise_for_status()
+    return response.json()
 
-def get_folder_name(page):
-    folder = page.get("Folder", {})
-    # If Folder is already a name, return it; else empty string
-    return folder.get("name") if folder else ""
+def main():
+    pages = get_notion_pages()
+    print(f"Found {len(pages)} pages in Notion.")
 
-# --- FETCH RECORDS FROM NOTION ---
-def get_notion_pages():
-    pages = []
-    start_cursor = None
-    while True:
-        response = notion.databases.query(
-            database_id=NOTION_DATABASE_ID,
-            start_cursor=start_cursor,
-            page_size=100
-        )
-        pages.extend(response["results"])
-        if response.get("has_more"):
-            start_cursor = response.get("next_cursor")
-        else:
-            break
-    return pages
+    for page in pages:
+        notion_id = page["id"]
+        discogs_id_prop = page["properties"].get("Discogs ID")
+        if not discogs_id_prop:
+            print(f"Skipping {notion_id}: No Discogs ID")
+            continue
 
-# --- UPDATE NOTION ---
-def update_notion_page(page_id, record):
-    format_size, format_speed, format_details = split_format_details(record.get("FormatDetails", ""))
+        discogs_id = None
+        if "number" in discogs_id_prop:
+            discogs_id = discogs_id_prop["number"]
+        elif "id" in discogs_id_prop:
+            discogs_id = discogs_id_prop["id"]
 
-    properties = {
-        "Title": {"title": [{"text": {"content": record.get("Title", "")}}]},
-        "Country": {"rich_text": [{"text": {"content": record.get("Country", "")}}]},
-        "ValueLow": {"number": safe_number(record.get("ValueLow"))},
-        "ValueMid": {"number": safe_number(record.get("ValueMid"))},
-        "ValueHigh": {"number": safe_number(record.get("ValueHigh"))},
-        "Discogs ID": {"number": int(record.get("DiscogsID", 0))},
-        "Folder": {"rich_text": [{"text": {"content": record.get("FolderName", "")}}]},
-        "FormatDetails": {"rich_text": [{"text": {"content": format_details}}]},
-        "FormatSpeed": {"rich_text": [{"text": {"content": format_speed}}]},
-        "FormatSize": {"rich_text": [{"text": {"content": format_size}}]},
-        "Notes": {"rich_text": [{"text": {"content": record.get("Notes", "")}}]} if record.get("Notes") else {"rich_text": []}
-    }
+        if not discogs_id:
+            print(f"Skipping {notion_id}: Discogs ID not found")
+            continue
 
-    try:
-        notion.pages.update(page_id=page_id, properties=properties)
-        print(f"Updated {record.get('Title', 'Unknown')} ({page_id})")
-    except Exception as e:
-        print(f"Failed {record.get('Title', 'Unknown')} ({page_id}): {e}")
+        release = get_discogs_release(discogs_id)
+        if not release:
+            print(f"Skipping {notion_id}: Discogs release not found")
+            continue
 
-# --- MAIN FLOW ---
-notion_pages = get_notion_pages()
+        # Extract fields
+        country = release.get("country")
+        folder_name = release.get("folder") if release.get("folder") else None
+        value_low = release.get("value_low")
+        value_mid = release.get("value_mid")
+        value_high = release.get("value_high")
+        format_details_raw = ", ".join([f"{f.get('name')}" for f in release.get("formats", []) if f.get("name")])
+        format_size, format_speed, format_details = parse_format_details(format_details_raw)
 
-for page in notion_pages:
-    props = page.get("properties", {})
-    discogs_id = props.get("Discogs ID", {}).get("number")
+        # Prepare properties for update
+        properties = {
+            "Country": {"rich_text": [{"text": {"content": country}}]} if country else None,
+            "Folder": {"rich_text": [{"text": {"content": folder_name}}]} if folder_name else None,
+            "ValueLow": {"number": value_low} if value_low else None,
+            "ValueMid": {"number": value_mid} if value_mid else None,
+            "ValueHigh": {"number": value_high} if value_high else None,
+            "FormatDetails": {"rich_text": [{"text": {"content": format_details}}]} if format_details else None,
+            "FormatSize": {"rich_text": [{"text": {"content": format_size}}]} if format_size else None,
+            "FormatSpeed": {"rich_text": [{"text": {"content": format_speed}}]} if format_speed else None,
+        }
 
-    if not discogs_id:
-        print(f"Skipping page {page['id']} — no Discogs ID")
-        continue
+        # Remove any None properties to avoid Notion validation errors
+        properties_clean = {k: v for k, v in properties.items() if v is not None}
 
-    try:
-        release = discogs.release(discogs_id)
-    except Exception as e:
-        print(f"Failed to fetch Discogs ID {discogs_id}: {e}")
-        continue
+        try:
+            update_notion_page(notion_id, properties_clean)
+            print(f"Updated {notion_id}")
+            time.sleep(0.2)  # avoid rate limit
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to update {notion_id}: {e}")
 
-    record = {
-        "Title": release.title,
-        "Country": release.country or "",
-        "ValueLow": getattr(release, "lowest_price", 0),
-        "ValueMid": getattr(release, "median_price", 0),
-        "ValueHigh": getattr(release, "highest_price", 0),
-        "DiscogsID": discogs_id,
-        "FolderName": get_folder_name(props),
-        "FormatDetails": ", ".join([f"{f['qty']} x {f['name']}" if isinstance(f, dict) else str(f) for f in release.formats]),
-        "Notes": getattr(release, "notes", "")
-    }
-
-    update_notion_page(page["id"], record)
-    time.sleep(1)  # rate-limit safety
+if __name__ == "__main__":
+    main()
