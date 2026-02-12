@@ -138,9 +138,22 @@ def create_notion_entry(release):
             "ValueLow": {"number": value_low} if value_low else None,
             "ValueMid": {"number": value_mid} if value_mid else None,
             "ValueHigh": {"number": value_high} if value_high else None,
-            "Notes": {"rich_text": [{"text": {"content": notes}}]} if notes else None
+            notes_raw = release.get("notes", [])
+
+if isinstance(notes_raw, list):
+    notes_text = " | ".join(n.get("value", "") for n in notes_raw)
+else:
+    notes_text = str(notes_raw)
+
+properties["Notes"] = {
+    "rich_text": [
+        {
+            "text": {
+                "content": notes_text
+            }
         }
-    }
+    ]
+}
 
     # Remove null properties
     data["properties"] = {k: v for k, v in data["properties"].items() if v is not None}
