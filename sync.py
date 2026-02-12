@@ -28,19 +28,12 @@ def get_discogs_release(discogs_id):
 
 
 def get_folder_map():
-    """
-    Fetch all Discogs folders and return {folder_id: folder_name}
-    """
     url = f"https://api.discogs.com/users/{USERNAME}/collection/folders"
     response = requests.get(url, headers=DISCOGS_HEADERS)
     response.raise_for_status()
     data = response.json()
 
-    folder_map = {}
-    for folder in data.get("folders", []):
-        folder_map[folder["id"]] = folder["name"]
-
-    return folder_map
+    return {folder["id"]: folder["name"] for folder in data.get("folders", [])}
 
 
 def parse_format_details(format_list):
@@ -69,15 +62,18 @@ def parse_format_details(format_list):
 
 
 def update_page(notion_id, country, format_size, format_speed, format_details, folder_name):
-    data = {
-        "properties": {
-            "Country": {"rich_text": [{"text": {"content": country or ""}}]},
-            "FormatSize": {"rich_text": [{"text": {"content": format_size or ""}}]},
-            "FormatSpeed": {"rich_text": [{"text": {"content": format_speed or ""}}]},
-            "FormatDetails": {"rich_text": [{"text": {"content": format_details or ""}}]},
-            "Folder": {"rich_text": [{"text": {"content": folder_name or ""}}]},
-        }
+    properties = {
+        "Country": {"rich_text": [{"text": {"content": country or ""}}]},
+        "FormatSize": {"rich_text": [{"text": {"content": format_size or ""}}]},
+        "FormatSpeed": {"rich_text": [{"text": {"content": format_speed or ""}}]},
+        "FormatDetails": {"rich_text": [{"text": {"content": format_details or ""}}]},
     }
+
+    # Only update Folder if we actually have a name
+    if folder_name:
+        properties["Folder"] = {"select": {"name": folder_name}}
+
+    data = {"properties": properties}
 
     response = requests.patch(
         f"{NOTION_API_URL}/{notion_id}",
@@ -112,15 +108,11 @@ def main():
             discogs_id_prop = props.get("Discogs ID", {})
             discogs_id = discogs_id_prop.get("number")
 
+            # Your Folder property currently stores numeric ID
             folder_prop = props.get("Folder", {})
-            folder_id = None
-
-            # If Folder currently stores ID as number
-            if folder_prop.get("number") is not None:
-                folder_id = folder_prop.get("number")
+            folder_id = folder_prop.get("number")
 
             if not discogs_id:
-                print(f"Skipping page {notion_id} (no Discogs ID)")
                 continue
 
             try:
@@ -130,7 +122,7 @@ def main():
                 format_list = release.get("formats", [])
                 fmt_size, fmt_speed, fmt_details = parse_format_details(format_list)
 
-                folder_name = folder_map.get(folder_id, "")
+                folder_name = folder_map.get(folder_id)
 
                 update_page(
                     notion_id,
