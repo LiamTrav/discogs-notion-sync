@@ -27,6 +27,17 @@ def get_discogs_release(discogs_id):
     return response.json()
 
 
+def get_collection_entry(discogs_id):
+    """
+    Get collection data for a release,
+    including the correct folder_id.
+    """
+    url = f"https://api.discogs.com/users/{USERNAME}/collection/releases/{discogs_id}"
+    response = requests.get(url, headers=DISCOGS_HEADERS)
+    response.raise_for_status()
+    return response.json()
+
+
 def get_folder_map():
     url = f"https://api.discogs.com/users/{USERNAME}/collection/folders"
     response = requests.get(url, headers=DISCOGS_HEADERS)
@@ -69,7 +80,6 @@ def update_page(notion_id, country, format_size, format_speed, format_details, f
         "FormatDetails": {"rich_text": [{"text": {"content": format_details or ""}}]},
     }
 
-    # Only update Folder if we actually have a name
     if folder_name:
         properties["Folder"] = {"select": {"name": folder_name}}
 
@@ -108,20 +118,19 @@ def main():
             discogs_id_prop = props.get("Discogs ID", {})
             discogs_id = discogs_id_prop.get("number")
 
-            # Your Folder property currently stores numeric ID
-            folder_prop = props.get("Folder", {})
-            folder_id = folder_prop.get("number")
-
             if not discogs_id:
                 continue
 
             try:
                 release = get_discogs_release(discogs_id)
+                collection_entry = get_collection_entry(discogs_id)
+
                 country = release.get("country")
 
                 format_list = release.get("formats", [])
                 fmt_size, fmt_speed, fmt_details = parse_format_details(format_list)
 
+                folder_id = collection_entry.get("folder_id")
                 folder_name = folder_map.get(folder_id)
 
                 update_page(
@@ -134,7 +143,7 @@ def main():
                 )
 
             except requests.exceptions.HTTPError as e:
-                print(f"Failed to fetch release {discogs_id}: {e}")
+                print(f"Failed to process release {discogs_id}: {e}")
 
         has_more = data.get("has_more", False)
         next_cursor = data.get("next_cursor")
