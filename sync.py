@@ -14,27 +14,36 @@ NOTION_HEADERS = {
     "Content-Type": "application/json",
 }
 
+DISCOGS_HEADERS = {
+    "Authorization": f"Discogs token={DISCOGS_TOKEN}",
+    "User-Agent": f"{USERNAME} discogs-notion-sync"
+}
+
 
 def get_discogs_release(discogs_id):
     url = f"https://api.discogs.com/releases/{discogs_id}"
-    response = requests.get(
-        url,
-        headers={
-            "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-            "User-Agent": f"{USERNAME} discogs-notion-sync"
-        },
-    )
+    response = requests.get(url, headers=DISCOGS_HEADERS)
     response.raise_for_status()
     return response.json()
 
 
+def get_folder_map():
+    """
+    Fetch all Discogs folders and return {folder_id: folder_name}
+    """
+    url = f"https://api.discogs.com/users/{USERNAME}/collection/folders"
+    response = requests.get(url, headers=DISCOGS_HEADERS)
+    response.raise_for_status()
+    data = response.json()
+
+    folder_map = {}
+    for folder in data.get("folders", []):
+        folder_map[folder["id"]] = folder["name"]
+
+    return folder_map
+
+
 def parse_format_details(format_list):
-    """
-    Extract:
-    - FormatSize (e.g. 7")
-    - FormatSpeed (e.g. 45 RPM)
-    - FormatDetails (everything else)
-    """
     if not format_list:
         return "", "", ""
 
@@ -48,29 +57,25 @@ def parse_format_details(format_list):
     for desc in descriptions:
         desc_clean = desc.strip()
 
-        # Size detection (7", 12", 10", etc.)
         if re.match(r'^\d+"$', desc_clean):
             size = desc_clean
-
-        # Speed detection (33 RPM, 45 RPM, etc.)
         elif re.match(r'^\d+\s*RPM$', desc_clean, re.IGNORECASE):
             speed = desc_clean
-
         else:
             remaining.append(desc_clean)
 
     details = ", ".join(remaining)
-
     return size, speed, details
 
 
-def update_page(notion_id, country, format_size, format_speed, format_details):
+def update_page(notion_id, country, format_size, format_speed, format_details, folder_name):
     data = {
         "properties": {
             "Country": {"rich_text": [{"text": {"content": country or ""}}]},
             "FormatSize": {"rich_text": [{"text": {"content": format_size or ""}}]},
             "FormatSpeed": {"rich_text": [{"text": {"content": format_speed or ""}}]},
             "FormatDetails": {"rich_text": [{"text": {"content": format_details or ""}}]},
+            "Folder": {"rich_text": [{"text": {"content": folder_name or ""}}]},
         }
     }
 
@@ -85,6 +90,8 @@ def update_page(notion_id, country, format_size, format_speed, format_details):
 
 
 def main():
+    folder_map = get_folder_map()
+
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     has_more = True
     next_cursor = None
@@ -100,8 +107,17 @@ def main():
 
         for page in data.get("results", []):
             notion_id = page["id"]
-            discogs_id_prop = page["properties"].get("Discogs ID", {})
+            props = page["properties"]
+
+            discogs_id_prop = props.get("Discogs ID", {})
             discogs_id = discogs_id_prop.get("number")
+
+            folder_prop = props.get("Folder", {})
+            folder_id = None
+
+            # If Folder currently stores ID as number
+            if folder_prop.get("number") is not None:
+                folder_id = folder_prop.get("number")
 
             if not discogs_id:
                 print(f"Skipping page {notion_id} (no Discogs ID)")
@@ -114,7 +130,16 @@ def main():
                 format_list = release.get("formats", [])
                 fmt_size, fmt_speed, fmt_details = parse_format_details(format_list)
 
-                update_page(notion_id, country, fmt_size, fmt_speed, fmt_details)
+                folder_name = folder_map.get(folder_id, "")
+
+                update_page(
+                    notion_id,
+                    country,
+                    fmt_size,
+                    fmt_speed,
+                    fmt_details,
+                    folder_name
+                )
 
             except requests.exceptions.HTTPError as e:
                 print(f"Failed to fetch release {discogs_id}: {e}")
