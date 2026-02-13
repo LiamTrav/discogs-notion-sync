@@ -1,7 +1,6 @@
 import os
 import requests
 import re
-import time
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -21,27 +20,11 @@ DISCOGS_HEADERS = {
 }
 
 
-def get_discogs_release(discogs_id, retries=3):
+def get_discogs_release(discogs_id):
     url = f"https://api.discogs.com/releases/{discogs_id}"
-
-    for attempt in range(retries):
-        response = requests.get(url, headers=DISCOGS_HEADERS)
-
-        if response.status_code == 404:
-            print(f"Release {discogs_id} not found (404). Skipping.")
-            return None
-
-        if response.status_code in (500, 502, 503, 504):
-            wait = 2 ** attempt
-            print(f"Discogs error {response.status_code} for {discogs_id}. Retrying in {wait}s...")
-            time.sleep(wait)
-            continue
-
-        response.raise_for_status()
-        return response.json()
-
-    print(f"Failed to fetch release {discogs_id} after retries.")
-    return None
+    response = requests.get(url, headers=DISCOGS_HEADERS)
+    response.raise_for_status()
+    return response.json()
 
 
 def get_folder_map():
@@ -78,7 +61,7 @@ def parse_format_details(format_list):
     return size, speed, details
 
 
-def update_page(notion_id, country, format_size, format_speed, format_details, folder_name, retries=3):
+def update_page(notion_id, country, format_size, format_speed, format_details, folder_name):
     properties = {
         "Country": {"rich_text": [{"text": {"content": country or ""}}]},
         "FormatSize": {"rich_text": [{"text": {"content": format_size or ""}}]},
@@ -86,29 +69,20 @@ def update_page(notion_id, country, format_size, format_speed, format_details, f
         "FormatDetails": {"rich_text": [{"text": {"content": format_details or ""}}]},
     }
 
+    # Only update Folder if we actually have a name
     if folder_name:
         properties["Folder"] = {"select": {"name": folder_name}}
 
     data = {"properties": properties}
 
-    for attempt in range(retries):
-        response = requests.patch(
-            f"{NOTION_API_URL}/{notion_id}",
-            headers=NOTION_HEADERS,
-            json=data
-        )
+    response = requests.patch(
+        f"{NOTION_API_URL}/{notion_id}",
+        headers=NOTION_HEADERS,
+        json=data
+    )
 
-        if response.status_code in (500, 502, 503, 504):
-            wait = 2 ** attempt
-            print(f"Notion error {response.status_code}. Retrying in {wait}s...")
-            time.sleep(wait)
-            continue
-
-        if response.status_code != 200:
-            print(f"Failed to update {notion_id}: {response.status_code} {response.text}")
-        return
-
-    print(f"Failed to update {notion_id} after retries.")
+    if response.status_code != 200:
+        print(f"Failed to update {notion_id}: {response.status_code} {response.text}")
 
 
 def main():
@@ -134,33 +108,33 @@ def main():
             discogs_id_prop = props.get("Discogs ID", {})
             discogs_id = discogs_id_prop.get("number")
 
+            # Your Folder property currently stores numeric ID
             folder_prop = props.get("Folder", {})
             folder_id = folder_prop.get("number")
 
             if not discogs_id:
                 continue
 
-            release = get_discogs_release(discogs_id)
-            if not release:
-                continue
+            try:
+                release = get_discogs_release(discogs_id)
+                country = release.get("country")
 
-            country = release.get("country")
+                format_list = release.get("formats", [])
+                fmt_size, fmt_speed, fmt_details = parse_format_details(format_list)
 
-            format_list = release.get("formats", [])
-            fmt_size, fmt_speed, fmt_details = parse_format_details(format_list)
+                folder_name = folder_map.get(folder_id)
 
-            folder_name = folder_map.get(folder_id)
+                update_page(
+                    notion_id,
+                    country,
+                    fmt_size,
+                    fmt_speed,
+                    fmt_details,
+                    folder_name
+                )
 
-            update_page(
-                notion_id,
-                country,
-                fmt_size,
-                fmt_speed,
-                fmt_details,
-                folder_name
-            )
-
-            time.sleep(0.4)  # polite pacing
+            except requests.exceptions.HTTPError as e:
+                print(f"Failed to fetch release {discogs_id}: {e}")
 
         has_more = data.get("has_more", False)
         next_cursor = data.get("next_cursor")
