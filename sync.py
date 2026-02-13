@@ -143,7 +143,7 @@ def main():
             try:
                 release = get_discogs_release(discogs_id)
                 if not release:
-							    continue
+								    continue
                 country = release.get("country")
 
                 format_list = release.get("formats", [])
