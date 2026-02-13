@@ -1,7 +1,6 @@
 import os
 import requests
 import re
-import time
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -21,56 +20,20 @@ DISCOGS_HEADERS = {
 }
 
 
-def discogs_get(url):
-    while True:
-        response = requests.get(url, headers=DISCOGS_HEADERS)
-        if response.status_code == 429:
-            retry_after = int(response.headers.get("Retry-After", 5))
-            print(f"Rate limited. Sleeping {retry_after}s...")
-            time.sleep(retry_after)
-            continue
-        response.raise_for_status()
-        return response.json()
-
-
 def get_discogs_release(discogs_id):
-    return discogs_get(f"https://api.discogs.com/releases/{discogs_id}")
+    url = f"https://api.discogs.com/releases/{discogs_id}"
+    response = requests.get(url, headers=DISCOGS_HEADERS)
+    response.raise_for_status()
+    return response.json()
 
 
 def get_folder_map():
-    data = discogs_get(
-        f"https://api.discogs.com/users/{USERNAME}/collection/folders"
-    )
+    url = f"https://api.discogs.com/users/{USERNAME}/collection/folders"
+    response = requests.get(url, headers=DISCOGS_HEADERS)
+    response.raise_for_status()
+    data = response.json()
+
     return {folder["id"]: folder["name"] for folder in data.get("folders", [])}
-
-
-def get_collection_map():
-    """
-    Build release_id -> folder_id map for entire collection
-    """
-    release_map = {}
-    page = 1
-
-    while True:
-        data = discogs_get(
-            f"https://api.discogs.com/users/{USERNAME}/collection/releases?per_page=100&page={page}"
-        )
-
-        releases = data.get("releases", [])
-        if not releases:
-            break
-
-        for item in releases:
-            release_id = item["id"]
-            folder_id = item["folder_id"]
-            release_map[release_id] = folder_id
-
-        if page >= data["pagination"]["pages"]:
-            break
-
-        page += 1
-
-    return release_map
 
 
 def parse_format_details(format_list):
@@ -106,13 +69,16 @@ def update_page(notion_id, country, format_size, format_speed, format_details, f
         "FormatDetails": {"rich_text": [{"text": {"content": format_details or ""}}]},
     }
 
+    # Only update Folder if we actually have a name
     if folder_name:
         properties["Folder"] = {"select": {"name": folder_name}}
+
+    data = {"properties": properties}
 
     response = requests.patch(
         f"{NOTION_API_URL}/{notion_id}",
         headers=NOTION_HEADERS,
-        json={"properties": properties},
+        json=data
     )
 
     if response.status_code != 200:
@@ -120,11 +86,7 @@ def update_page(notion_id, country, format_size, format_speed, format_details, f
 
 
 def main():
-    print("Fetching folder map...")
     folder_map = get_folder_map()
-
-    print("Fetching collection map...")
-    collection_map = get_collection_map()
 
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     has_more = True
@@ -146,18 +108,20 @@ def main():
             discogs_id_prop = props.get("Discogs ID", {})
             discogs_id = discogs_id_prop.get("number")
 
+            # Your Folder property currently stores numeric ID
+            folder_prop = props.get("Folder", {})
+            folder_id = folder_prop.get("number")
+
             if not discogs_id:
                 continue
 
             try:
                 release = get_discogs_release(discogs_id)
-
                 country = release.get("country")
-                fmt_size, fmt_speed, fmt_details = parse_format_details(
-                    release.get("formats", [])
-                )
 
-                folder_id = collection_map.get(discogs_id)
+                format_list = release.get("formats", [])
+                fmt_size, fmt_speed, fmt_details = parse_format_details(format_list)
+
                 folder_name = folder_map.get(folder_id)
 
                 update_page(
@@ -166,11 +130,11 @@ def main():
                     fmt_size,
                     fmt_speed,
                     fmt_details,
-                    folder_name,
+                    folder_name
                 )
 
             except requests.exceptions.HTTPError as e:
-                print(f"Failed to process release {discogs_id}: {e}")
+                print(f"Failed to fetch release {discogs_id}: {e}")
 
         has_more = data.get("has_more", False)
         next_cursor = data.get("next_cursor")
