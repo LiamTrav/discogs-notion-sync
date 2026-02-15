@@ -35,31 +35,31 @@ def get_folder_map():
 
 def get_full_collection():
     collection = {}
-    folder_map = get_folder_map()
+    page = 1
 
-    for folder_id in folder_map.keys():
+    while True:
+        url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
+        r = requests.get(url, headers=DISCOGS_HEADERS)
+        r.raise_for_status()
+        data = r.json()
 
-        page = 1
-        while True:
-            url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/{folder_id}/releases?page={page}&per_page=100"
-            r = requests.get(url, headers=DISCOGS_HEADERS)
-            r.raise_for_status()
-            data = r.json()
+        for item in data["releases"]:
+            discogs_id = item["id"]
+            collection[discogs_id] = {
+                "folder_id": item["folder_id"],
+                "basic_information": item["basic_information"]
+            }
 
-            for item in data["releases"]:
-                discogs_id = item["id"]
-                collection[discogs_id] = {
-                    "folder_id": folder_id,
-                    "basic_information": item["basic_information"]
-                }
+        if page >= data["pagination"]["pages"]:
+            break
 
-            if page >= data["pagination"]["pages"]:
-                break
+        page += 1
+        time.sleep(1)
 
-            page += 1
-            time.sleep(1)
-
+    print("Collection length:", len(collection))
     return collection
+
+
 
 
 def parse_format_details(format_list):
