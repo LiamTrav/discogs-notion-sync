@@ -38,8 +38,10 @@ def get_collection():
 
         for item in data["releases"]:
             discogs_id = item["id"]
-            folder_id = item["folder_id"]
-            releases[discogs_id] = folder_id
+            releases[discogs_id] = {
+                "folder_id": item["folder_id"],
+                "basic_information": item["basic_information"]
+            }
 
         if page >= data["pagination"]["pages"]:
             break
@@ -56,29 +58,6 @@ def get_folder_map():
     r.raise_for_status()
     data = r.json()
     return {f["id"]: f["name"] for f in data["folders"]}
-
-
-def get_release(discogs_id, retries=3):
-    url = f"https://api.discogs.com/releases/{discogs_id}"
-
-    for attempt in range(retries):
-        r = requests.get(url, headers=DISCOGS_HEADERS)
-
-        if r.status_code == 404:
-            print(f"Release {discogs_id} not found (404). Skipping.")
-            return None
-
-        if r.status_code in (500, 502, 503, 504):
-            wait = 2 ** attempt
-            print(f"Discogs error {r.status_code} for {discogs_id}. Retrying in {wait}s...")
-            time.sleep(wait)
-            continue
-
-        r.raise_for_status()
-        return r.json()
-
-    print(f"Failed to fetch release {discogs_id} after retries.")
-    return None
 
 
 def parse_format_details(format_list):
@@ -106,8 +85,8 @@ def parse_format_details(format_list):
     return size, speed, details
 
 
-def get_catno(release):
-    labels = release.get("labels", [])
+def get_catno_from_basic(basic_info):
+    labels = basic_info.get("labels", [])
     catnos = []
 
     for label in labels:
@@ -148,7 +127,7 @@ def get_notion_pages():
     return pages
 
 
-def update_page(notion_id, country, size, speed, details, folder_name, catno, retries=3):
+def update_page(notion_id, country, size, speed, details, folder_name, catno):
     properties = {
         "Country": {"rich_text": [{"text": {"content": country or ""}}]},
         "FormatSize": {"rich_text": [{"text": {"content": size or ""}}]},
@@ -160,35 +139,32 @@ def update_page(notion_id, country, size, speed, details, folder_name, catno, re
     if folder_name:
         properties["Folder"] = {"select": {"name": folder_name}}
 
-    for attempt in range(retries):
-        r = requests.patch(
-            f"{NOTION_API_URL}/{notion_id}",
-            headers=NOTION_HEADERS,
-            json={"properties": properties},
-        )
-
-        if r.status_code in (500, 502, 503, 504):
-            wait = 2 ** attempt
-            print(f"Notion error {r.status_code}. Retrying in {wait}s...")
-            time.sleep(wait)
-            continue
-
-        if r.status_code != 200:
-            print(f"Failed update {notion_id}: {r.status_code} {r.text}")
-        return
-
-    print(f"Failed to update {notion_id} after retries.")
+    requests.patch(
+        f"{NOTION_API_URL}/{notion_id}",
+        headers=NOTION_HEADERS,
+        json={"properties": properties},
+    )
 
 
-def create_page(discogs_id, release, folder_name, catno):
+def create_page(discogs_id, basic_info, folder_name):
+    title = basic_info.get("title", "Unknown")
+    country = basic_info.get("country", "")
+    formats = basic_info.get("formats", [])
+
+    size, speed, details = parse_format_details(formats)
+    catno = get_catno_from_basic(basic_info)
+
     properties = {
         "Title": {
             "title": [
-                {"text": {"content": release.get("title", "Unknown")}}
+                {"text": {"content": title}}
             ]
         },
         "Discogs ID": {"number": discogs_id},
-        "Country": {"rich_text": [{"text": {"content": release.get("country", "")}}]},
+        "Country": {"rich_text": [{"text": {"content": country or ""}}]},
+        "FormatSize": {"rich_text": [{"text": {"content": size or ""}}]},
+        "FormatSpeed": {"rich_text": [{"text": {"content": speed or ""}}]},
+        "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
         "CatNo": {"rich_text": [{"text": {"content": catno or ""}}]},
     }
 
@@ -222,21 +198,17 @@ def main():
     print("Loading Notion pages...")
     notion_pages = get_notion_pages()
 
-    for discogs_id, folder_id in collection.items():
-        release = get_release(discogs_id)
-        if not release:
-            continue
-
-        folder_name = folder_map.get(folder_id)
-        catno = get_catno(release)
-
-        format_list = release.get("formats", [])
-        size, speed, details = parse_format_details(format_list)
+    for discogs_id, item in collection.items():
+        folder_name = folder_map.get(item["folder_id"])
+        basic_info = item["basic_information"]
 
         if discogs_id in notion_pages:
+            size, speed, details = parse_format_details(basic_info.get("formats", []))
+            catno = get_catno_from_basic(basic_info)
+
             update_page(
                 notion_pages[discogs_id],
-                release.get("country"),
+                basic_info.get("country"),
                 size,
                 speed,
                 details,
@@ -246,9 +218,8 @@ def main():
         else:
             create_page(
                 discogs_id,
-                release,
-                folder_name,
-                catno
+                basic_info,
+                folder_name
             )
 
         time.sleep(0.5)
