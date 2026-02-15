@@ -1,6 +1,5 @@
 import os
 import requests
-import re
 import time
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
@@ -8,219 +7,181 @@ NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 USERNAME = os.environ["DISCOGS_USERNAME"]
 
-NOTION_API_URL = "https://api.notion.com/v1/pages"
+headers_discogs = {
+    "Authorization": f"Discogs token={DISCOGS_TOKEN}",
+    "User-Agent": "DiscogsNotionSync/1.0"
+}
 
-NOTION_HEADERS = {
+headers_notion = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Notion-Version": "2022-06-28",
-    "Content-Type": "application/json",
+    "Content-Type": "application/json"
 }
 
-DISCOGS_HEADERS = {
-    "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": f"{USERNAME} discogs-notion-sync"
-}
 
-# ---------------------------------------------------
-# DISCOGS
-# ---------------------------------------------------
+# -----------------------------
+# GET DISCOGS COLLECTION
+# -----------------------------
+def get_discogs_collection():
+    releases = []
 
-def get_folder_map():
-    url = f"https://api.discogs.com/users/{USERNAME}/collection/folders"
-    r = requests.get(url, headers=DISCOGS_HEADERS)
-    r.raise_for_status()
-    data = r.json()
-    return {f["id"]: f["name"] for f in data["folders"]}
+    url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/0/releases?page=1&per_page=100"
+    response = requests.get(url, headers=headers_discogs)
 
+    if response.status_code != 200:
+        print("Discogs API failed:")
+        print(response.status_code)
+        print(response.text)
+        exit(1)
 
-def get_full_collection():
-    collection = {}
-    page = 1
+    data = response.json()
+    total_pages = data.get("pagination", {}).get("pages", 1)
 
-    while True:
+    print(f"Total pages: {total_pages}")
+
+    releases.extend(data.get("releases", []))
+    print(f"Collected page 1 ({len(releases)} releases)")
+
+    for page in range(2, total_pages + 1):
+        print(f"Fetching page {page}...")
+
         url = f"https://api.discogs.com/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
-        r = requests.get(url, headers=DISCOGS_HEADERS)
-        r.raise_for_status()
-        data = r.json()
+        response = requests.get(url, headers=headers_discogs)
 
-        for item in data["releases"]:
-            discogs_id = item["id"]
-            collection[discogs_id] = {
-                "folder_id": item["folder_id"],
-                "basic_information": item["basic_information"]
-            }
+        if response.status_code != 200:
+            print("Discogs API failed:")
+            print(response.status_code)
+            print(response.text)
+            exit(1)
 
-        if page >= data["pagination"]["pages"]:
-            break
+        data = response.json()
+        releases.extend(data.get("releases", []))
+        print(f"Collected so far: {len(releases)}")
 
-        page += 1
         time.sleep(1)
 
-    print("Collection length:", len(collection))
-    return collection
+    return releases
 
 
-
-
-def parse_format_details(format_list):
-    if not format_list:
-        return "", "", ""
-
-    fmt = format_list[0]
-    descriptions = fmt.get("descriptions", [])
-
-    size = ""
-    speed = ""
-    remaining = []
-
-    for desc in descriptions:
-        desc_clean = desc.strip()
-
-        if re.match(r'^\d+"$', desc_clean):
-            size = desc_clean
-        elif re.match(r'^\d+\s*RPM$', desc_clean, re.IGNORECASE):
-            speed = desc_clean
-        else:
-            remaining.append(desc_clean)
-
-    details = ", ".join(remaining)
-    return size, speed, details
-
-
-def get_catno(basic_info):
-    labels = basic_info.get("labels", [])
-    catnos = []
-
-    for label in labels:
-        catno = label.get("catno")
-        if catno and catno.lower() != "none":
-            catnos.append(catno.strip())
-
-    return ", ".join(catnos)
-
-# ---------------------------------------------------
-# NOTION
-# ---------------------------------------------------
-
-def get_notion_pages():
-    pages = {}
+# -----------------------------
+# CHECK IF PAGE EXISTS
+# -----------------------------
+def notion_page_exists(discogs_id):
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
-    has_more = True
-    cursor = None
 
-    while has_more:
-        payload = {"page_size": 100}
-        if cursor:
-            payload["start_cursor"] = cursor
-
-        r = requests.post(url, headers=NOTION_HEADERS, json=payload)
-        r.raise_for_status()
-        data = r.json()
-
-        for page in data["results"]:
-            discogs_id = page["properties"].get("Discogs ID", {}).get("number")
-            if discogs_id:
-                pages[discogs_id] = page["id"]
-
-        has_more = data["has_more"]
-        cursor = data.get("next_cursor")
-
-    return pages
-
-
-def update_page(notion_id, country, size, speed, details, folder_name, catno):
-    properties = {
-        "Country": {"rich_text": [{"text": {"content": country or ""}}]},
-        "FormatSize": {"rich_text": [{"text": {"content": size or ""}}]},
-        "FormatSpeed": {"rich_text": [{"text": {"content": speed or ""}}]},
-        "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
-        "CatNo": {"rich_text": [{"text": {"content": catno or ""}}]},
+    payload = {
+        "filter": {
+            "property": "Discogs ID",
+            "number": {
+                "equals": discogs_id
+            }
+        }
     }
 
-    if folder_name:
-        properties["Folder"] = {"select": {"name": folder_name}}
+    response = requests.post(url, headers=headers_notion, json=payload)
 
-    requests.patch(
-        f"{NOTION_API_URL}/{notion_id}",
-        headers=NOTION_HEADERS,
-        json={"properties": properties},
-    )
+    if response.status_code != 200:
+        print("Notion query failed:")
+        print(response.status_code)
+        print(response.text)
+        return False
+
+    results = response.json().get("results", [])
+    return len(results) > 0
 
 
-def create_page(discogs_id, basic_info, folder_name, catno):
-    size, speed, details = parse_format_details(basic_info.get("formats", []))
+# -----------------------------
+# CREATE NOTION PAGE
+# -----------------------------
+def create_notion_page(release):
+    basic = release["basic_information"]
+
+    discogs_id = basic.get("id")
+    title = basic.get("title", "")
+    artists = ", ".join(a["name"] for a in basic.get("artists", []))
+    labels = ", ".join(l["name"] for l in basic.get("labels", []))
+    year = basic.get("year")
+    country = basic.get("country")
+    formats = basic.get("formats", [])
+
+    format_size = formats[0]["name"] if formats else None
+    format_speed = None
+    format_details = None
+
+    if formats and "descriptions" in formats[0]:
+        descriptions = formats[0]["descriptions"]
+        format_details = ", ".join(descriptions)
+
+    value = release.get("estimated_value", {})
+    value_low = value.get("value_low")
+    value_mid = value.get("value")
+    value_high = value.get("value_high")
+
+    date_added = release.get("date_added")
+    folder_id = release.get("folder_id")
+
+    # Convert Notes properly
+    notes_raw = release.get("notes", [])
+    if isinstance(notes_raw, list):
+        notes = " | ".join(n.get("value", "") for n in notes_raw)
+    else:
+        notes = str(notes_raw)
 
     properties = {
-        "Title": {
-            "title": [
-                {"text": {"content": basic_info.get("title", "Unknown")}}
-            ]
-        },
         "Discogs ID": {"number": discogs_id},
-        "Country": {"rich_text": [{"text": {"content": basic_info.get("country", "")}}]},
-        "FormatSize": {"rich_text": [{"text": {"content": size or ""}}]},
-        "FormatSpeed": {"rich_text": [{"text": {"content": speed or ""}}]},
-        "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
-        "CatNo": {"rich_text": [{"text": {"content": catno or ""}}]},
+        "Title": {"title": [{"text": {"content": title}}]},
+        "Artist": {"rich_text": [{"text": {"content": artists}}]},
+        "Label": {"rich_text": [{"text": {"content": labels}}]},
+        "Year": {"number": year} if year else None,
+        "ValueLow": {"number": value_low} if value_low else None,
+        "ValueMid": {"number": value_mid} if value_mid else None,
+        "ValueHigh": {"number": value_high} if value_high else None,
+        "Country": {"select": {"name": country}} if country else None,
+        "FormatSize": {"select": {"name": format_size}} if format_size else None,
+        "FormatSpeed": {"select": {"name": format_speed}} if format_speed else None,
+        "FormatDetails": {"rich_text": [{"text": {"content": format_details}}]} if format_details else None,
+        "Added": {"date": {"start": date_added}} if date_added else None,
+        "Folder": {"select": {"name": str(folder_id)}} if folder_id else None,
+        "Notes": {"rich_text": [{"text": {"content": notes}}]} if notes else None,
     }
 
-    if folder_name:
-        properties["Folder"] = {"select": {"name": folder_name}}
+    # Remove None values
+    properties = {k: v for k, v in properties.items() if v is not None}
 
-    r = requests.post(
-        NOTION_API_URL,
-        headers=NOTION_HEADERS,
-        json={
-            "parent": {"database_id": DATABASE_ID},
-            "properties": properties,
-        },
+    payload = {
+        "parent": {"database_id": DATABASE_ID},
+        "properties": properties
+    }
+
+    response = requests.post(
+        "https://api.notion.com/v1/pages",
+        headers=headers_notion,
+        json=payload
     )
 
-    if r.status_code != 200:
-        print(f"Failed create {discogs_id}: {r.status_code} {r.text}")
+    if response.status_code != 200:
+        print("Failed to create page:")
+        print(response.status_code)
+        print(response.text)
 
-# ---------------------------------------------------
-# MAIN
-# ---------------------------------------------------
 
-def main():
-    print("Loading Discogs collection...")
-    collection = get_full_collection()
+# -----------------------------
+# SYNC
+# -----------------------------
+def sync():
+    releases = get_discogs_collection()
+    print(f"Found {len(releases)} releases in Discogs collection")
 
-    print("Loading folder map...")
-    folder_map = get_folder_map()
+    for release in releases:
+        discogs_id = release["basic_information"]["id"]
 
-    print("Loading Notion pages...")
-    notion_pages = get_notion_pages()
-
-    for discogs_id, item in collection.items():
-
-        folder_name = folder_map.get(item["folder_id"])
-        basic_info = item["basic_information"]
-        catno = get_catno(basic_info)
-
-        size, speed, details = parse_format_details(basic_info.get("formats", []))
-
-        if discogs_id in notion_pages:
-            update_page(
-                notion_pages[discogs_id],
-                basic_info.get("country"),
-                size,
-                speed,
-                details,
-                folder_name,
-                catno
-            )
+        if not notion_page_exists(discogs_id):
+            create_notion_page(release)
+            print(f"Created {discogs_id}")
+            time.sleep(0.5)
         else:
-            create_page(
-                discogs_id,
-                basic_info,
-                folder_name,
-                catno
-            )
-
-        time.sleep(0.5)
+            print(f"Skipped {discogs_id} (already exists)")
 
 
 if __name__ == "__main__":
-    main()
+    sync()
