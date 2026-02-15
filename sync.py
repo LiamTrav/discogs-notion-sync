@@ -182,7 +182,7 @@ def update_page(notion_id, country, size, speed, details, folder_name, catno, re
 
 def create_page(discogs_id, release, folder_name, catno):
     properties = {
-        "Name": {
+        "Title": {
             "title": [
                 {"text": {"content": release.get("title", "Unknown")}}
             ]
