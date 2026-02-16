@@ -264,6 +264,7 @@ def main():
                 notion_request("PATCH", f"{NOTION_BASE}/pages/{page_id}", {"properties": properties})
                 updated += 1
             else:
+                print(f"[CREATE] Release '{basic.get('title')}' ({release_id}) will be created")
                 properties["Added"] = {"date": {"start": release.get("date_added")}}
                 notion_request(
                     "POST",
