@@ -143,17 +143,17 @@ def fetch_all_notion_pages():
 
     return pages
 
-        print("Checking for mismatches...")
+    print("Checking for mismatches...")
 
-        discogs_release_ids = set(r["basic_information"]["id"] for r in collection)
-        notion_release_ids = set(notion_pages.keys())
+    discogs_release_ids = set(r["basic_information"]["id"] for r in collection)
+    notion_release_ids = set(notion_pages.keys())
+       
+    missing_in_notion = discogs_release_ids - notion_release_ids
         
-        missing_in_notion = discogs_release_ids - notion_release_ids
-        
-        print(f"Unique Discogs release IDs: {len(discogs_release_ids)}")
-        print(f"Unique Notion Discogs IDs: {len(notion_release_ids)}")
-        print(f"Release IDs missing from Notion: {len(missing_in_notion)}")
-        print("Missing IDs:", list(missing_in_notion)[:20])
+    print(f"Unique Discogs release IDs: {len(discogs_release_ids)}")
+    print(f"Unique Notion Discogs IDs: {len(notion_release_ids)}")
+    print(f"Release IDs missing from Notion: {len(missing_in_notion)}")
+    print("Missing IDs:", list(missing_in_notion)[:20])
 
 
 def fetch_folder_options():
