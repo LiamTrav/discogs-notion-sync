@@ -23,25 +23,77 @@ headers_notion = {
 }
 
 
-# -----------------------------
-# Helper Functions
-# -----------------------------
+# ---------------------------------------------------
+# RETRY HELPERS
+# ---------------------------------------------------
 
-def get_all_discogs_collection():
+def notion_request(method, url, payload=None, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            if method == "GET":
+                r = requests.get(url, headers=headers_notion)
+            elif method == "POST":
+                r = requests.post(url, headers=headers_notion, json=payload)
+            elif method == "PATCH":
+                r = requests.patch(url, headers=headers_notion, json=payload)
+            else:
+                raise ValueError("Unsupported method")
+
+            if r.status_code >= 500 or r.status_code == 429:
+                raise requests.exceptions.HTTPError(f"{r.status_code} error")
+
+            r.raise_for_status()
+            return r
+
+        except requests.exceptions.RequestException as e:
+            wait = 2 ** attempt
+            print(f"[Notion Retry] Attempt {attempt+1}/{max_retries} failed: {e}. Waiting {wait}s")
+            time.sleep(wait)
+
+    print("[Notion ERROR] Failed after retries.")
+    return None
+
+
+def discogs_request(url, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, headers=headers_discogs)
+            if r.status_code >= 500 or r.status_code == 429:
+                raise requests.exceptions.HTTPError(f"{r.status_code} error")
+
+            r.raise_for_status()
+            return r
+
+        except requests.exceptions.RequestException as e:
+            wait = 2 ** attempt
+            print(f"[Discogs Retry] Attempt {attempt+1}/{max_retries} failed: {e}. Waiting {wait}s")
+            time.sleep(wait)
+
+    print(f"[Discogs ERROR] Failed after retries for URL: {url}")
+    return None
+
+
+# ---------------------------------------------------
+# DISCOGS
+# ---------------------------------------------------
+
+def get_full_collection():
     releases = []
     page = 1
     per_page = 100
 
     while True:
         url = f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page={per_page}"
-        r = requests.get(url, headers=headers_discogs)
-        r.raise_for_status()
-        data = r.json()
+        r = discogs_request(url)
+        if not r:
+            break
 
+        data = r.json()
         releases.extend(data["releases"])
 
         if page >= data["pagination"]["pages"]:
             break
+
         page += 1
 
     return releases
@@ -49,8 +101,8 @@ def get_all_discogs_collection():
 
 def get_market_stats(release_id):
     url = f"{DISCOGS_BASE}/marketplace/stats/{release_id}"
-    r = requests.get(url, headers=headers_discogs)
-    if r.status_code != 200:
+    r = discogs_request(url)
+    if not r:
         return None, None, None
 
     data = r.json()
@@ -61,6 +113,67 @@ def get_market_stats(release_id):
     return lowest, median, highest
 
 
+# ---------------------------------------------------
+# NOTION HELPERS
+# ---------------------------------------------------
+
+def fetch_all_notion_pages():
+    pages = {}
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        payload = {"page_size": 100}
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        r = notion_request("POST", f"{NOTION_BASE}/databases/{DATABASE_ID}/query", payload)
+        if not r:
+            break
+
+        data = r.json()
+
+        for result in data["results"]:
+            discogs_id = result["properties"]["Discogs ID"]["number"]
+            if discogs_id:
+                pages[discogs_id] = result
+
+        has_more = data.get("has_more")
+        start_cursor = data.get("next_cursor")
+
+    return pages
+
+
+def fetch_folder_options():
+    r = notion_request("GET", f"{NOTION_BASE}/databases/{DATABASE_ID}")
+    if not r:
+        return set()
+
+    db = r.json()
+    options = db["properties"]["Folder"]["select"]["options"]
+    return set(o["name"] for o in options)
+
+
+def update_folder_schema(new_folder, existing_options):
+    existing_options.add(new_folder)
+
+    payload = {
+        "properties": {
+            "Folder": {
+                "select": {
+                    "options": [{"name": name} for name in existing_options]
+                }
+            }
+        }
+    }
+
+    notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
+
+
+# ---------------------------------------------------
+# FORMAT PARSER
+# ---------------------------------------------------
+
 def parse_formats(formats):
     size = None
     speed = None
@@ -70,8 +183,7 @@ def parse_formats(formats):
         return None, None, None
 
     for fmt in formats:
-        descriptions = fmt.get("descriptions", [])
-        for d in descriptions:
+        for d in fmt.get("descriptions", []):
             if '"' in d and not size:
                 size = d
             elif "RPM" in d and not speed:
@@ -79,160 +191,89 @@ def parse_formats(formats):
             else:
                 details.append(d)
 
-    details_str = ", ".join(details) if details else None
-    return size, speed, details_str
+    return size, speed, ", ".join(details) if details else None
 
 
-def notion_query_by_discogs_id(discogs_id):
-    url = f"{NOTION_BASE}/databases/{DATABASE_ID}/query"
-    payload = {
-        "filter": {
-            "property": "Discogs ID",
-            "number": {
-                "equals": discogs_id
-            }
-        }
-    }
-    r = requests.post(url, headers=headers_notion, json=payload)
-    r.raise_for_status()
-    results = r.json()["results"]
-    return results[0] if results else None
-
-
-def ensure_folder_option(folder_name):
-    # Retrieve current DB schema
-    db_url = f"{NOTION_BASE}/databases/{DATABASE_ID}"
-    r = requests.get(db_url, headers=headers_notion)
-    r.raise_for_status()
-    db = r.json()
-
-    options = db["properties"]["Folder"]["select"]["options"]
-    existing_names = [o["name"] for o in options]
-
-    if folder_name in existing_names:
-        return
-
-    # Add new option
-    options.append({"name": folder_name})
-    update_payload = {
-        "properties": {
-            "Folder": {
-                "select": {
-                    "options": options
-                }
-            }
-        }
-    }
-
-    requests.patch(db_url, headers=headers_notion, json=update_payload).raise_for_status()
-
-
-def build_notion_properties(release, stats, is_create):
-    release_data = release["basic_information"]
-
-    size, speed, details = parse_formats(release_data.get("formats"))
-    lowest, median, highest = stats
-
-    props = {
-        "Title": {
-            "title": [{"text": {"content": release_data.get("title", "")}}]
-        },
-        "Artist": {
-            "rich_text": [{"text": {"content": ", ".join([a["name"] for a in release_data.get("artists", [])])}}]
-        },
-        "Discogs ID": {
-            "number": release_data.get("id")
-        },
-        "Year": {
-            "number": release_data.get("year")
-        },
-        "Label": {
-            "rich_text": [{"text": {"content": ", ".join(release_data.get("labels", [{}])[0].get("name", ""))}}]
-        },
-        "Country": {
-            "rich_text": [{"text": {"content": release_data.get("country", "")}}]
-        },
-        "FormatSize": {
-            "rich_text": [{"text": {"content": size or ""}}]
-        },
-        "FormatSpeed": {
-            "rich_text": [{"text": {"content": speed or ""}}]
-        },
-        "FormatDetails": {
-            "rich_text": [{"text": {"content": details or ""}}]
-        },
-        "ValueLow": {"number": lowest},
-        "ValueMed": {"number": median},
-        "ValueHigh": {"number": highest},
-        "CatNo": {
-            "rich_text": [{"text": {"content": release_data.get("labels", [{}])[0].get("catno", "")}}]
-        }
-    }
-
-    folder_name = release.get("folder_name")
-    if folder_name:
-        props["Folder"] = {"select": {"name": folder_name}}
-
-    if is_create:
-        props["Added"] = {
-            "date": {
-                "start": release.get("date_added")
-            }
-        }
-
-    return props
-
-
-# -----------------------------
-# Main Sync Logic
-# -----------------------------
+# ---------------------------------------------------
+# MAIN
+# ---------------------------------------------------
 
 def main():
     print("Fetching Discogs collection...")
-    collection = get_all_discogs_collection()
-    total_releases = len(collection)
-    print(f"Total releases identified in Discogs: {total_releases}")
+    collection = get_full_collection()
+    print(f"Total releases identified in Discogs: {len(collection)}")
+
+    print("Fetching existing Notion pages...")
+    notion_pages = fetch_all_notion_pages()
+    print(f"Existing pages in Notion: {len(notion_pages)}")
+
+    folder_options = fetch_folder_options()
 
     created = 0
     updated = 0
+    failed = 0
 
     for release in collection:
-        release_id = release["basic_information"]["id"]
-        folder_name = release.get("folder_name")
-        release["folder_name"] = folder_name
+        try:
+            basic = release["basic_information"]
+            release_id = basic["id"]
 
-        stats = get_market_stats(release_id)
-        time.sleep(1)  # rate limit safety
+            lowest, median, highest = get_market_stats(release_id)
 
-        existing_page = notion_query_by_discogs_id(release_id)
+            size, speed, details = parse_formats(basic.get("formats"))
 
-        if folder_name:
-            ensure_folder_option(folder_name)
+            labels = [l["name"] for l in basic.get("labels", [])]
+            label_text = ", ".join(labels)
+            catno = basic.get("labels", [{}])[0].get("catno", "")
 
-        if existing_page:
-            page_id = existing_page["id"]
-            props = build_notion_properties(release, stats, is_create=False)
-            requests.patch(
-                f"{NOTION_BASE}/pages/{page_id}",
-                headers=headers_notion,
-                json={"properties": props}
-            ).raise_for_status()
-            updated += 1
-        else:
-            props = build_notion_properties(release, stats, is_create=True)
-            requests.post(
-                f"{NOTION_BASE}/pages",
-                headers=headers_notion,
-                json={
-                    "parent": {"database_id": DATABASE_ID},
-                    "properties": props
-                }
-            ).raise_for_status()
-            created += 1
+            folder_name = release.get("folder_name")
+            if folder_name and folder_name not in folder_options:
+                print(f"Adding new folder option: {folder_name}")
+                update_folder_schema(folder_name, folder_options)
+
+            properties = {
+                "Title": {"title": [{"text": {"content": basic.get("title", "")}}]},
+                "Artist": {"rich_text": [{"text": {"content": ", ".join(a["name"] for a in basic.get("artists", []))}}]},
+                "Discogs ID": {"number": release_id},
+                "Year": {"number": basic.get("year")},
+                "Label": {"rich_text": [{"text": {"content": label_text}}]},
+                "Country": {"rich_text": [{"text": {"content": basic.get("country", "")}}]},
+                "FormatSize": {"rich_text": [{"text": {"content": size or ""}}]},
+                "FormatSpeed": {"rich_text": [{"text": {"content": speed or ""}}]},
+                "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
+                "ValueLow": {"number": lowest},
+                "ValueMed": {"number": median},
+                "ValueHigh": {"number": highest},
+                "CatNo": {"rich_text": [{"text": {"content": catno}}]},
+            }
+
+            if release_id in notion_pages:
+                page_id = notion_pages[release_id]["id"]
+                notion_request("PATCH", f"{NOTION_BASE}/pages/{page_id}", {"properties": properties})
+                updated += 1
+            else:
+                properties["Added"] = {"date": {"start": release.get("date_added")}}
+                notion_request(
+                    "POST",
+                    f"{NOTION_BASE}/pages",
+                    {
+                        "parent": {"database_id": DATABASE_ID},
+                        "properties": properties
+                    }
+                )
+                created += 1
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"[Release ERROR] ID {release_id}: {e}")
+            failed += 1
+            continue
 
     print("Sync complete.")
-    print(f"Pages created in Notion: {created}")
-    print(f"Pages updated in Notion: {updated}")
+    print(f"Created: {created}")
+    print(f"Updated: {updated}")
+    print(f"Failed: {failed}")
 
 
 if __name__ == "__main__":
