@@ -200,6 +200,8 @@ def main():
     print("Loading Notion pages...")
     notion_pages = get_notion_pages()
 
+    print("Notion pages found:", len(notion_pages))
+
     for discogs_id, item in collection.items():
 
         folder_name = folder_map.get(item["folder_id"])
