@@ -225,6 +225,9 @@ def main():
     updated = 0
     failed = 0
 
+    print(f"Notion pages with Discogs ID found: {len(notion_pages)}")
+    print(f"Discogs collection count: {len(collection)}")
+    
     for release in collection:
         try:
             basic = release["basic_information"]
