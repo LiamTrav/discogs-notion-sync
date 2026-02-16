@@ -1,7 +1,6 @@
 import os
 import time
 import requests
-from datetime import datetime
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -13,7 +12,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/1.0"
+    "User-Agent": "discogs-notion-sync/2.0"
 }
 
 headers_notion = {
@@ -21,7 +20,6 @@ headers_notion = {
     "Content-Type": "application/json",
     "Notion-Version": "2022-06-28"
 }
-
 
 # ---------------------------------------------------
 # RETRY HELPERS
@@ -99,6 +97,14 @@ def get_full_collection():
     return releases
 
 
+def get_release_details(release_id):
+    url = f"{DISCOGS_BASE}/releases/{release_id}"
+    r = discogs_request(url)
+    if not r:
+        return {}
+    return r.json()
+
+
 def get_market_stats(release_id):
     url = f"{DISCOGS_BASE}/marketplace/stats/{release_id}"
     r = discogs_request(url)
@@ -114,7 +120,7 @@ def get_market_stats(release_id):
 
 
 # ---------------------------------------------------
-# NOTION HELPERS
+# NOTION
 # ---------------------------------------------------
 
 def fetch_all_notion_pages():
@@ -142,18 +148,6 @@ def fetch_all_notion_pages():
         start_cursor = data.get("next_cursor")
 
     return pages
-
-    print("Checking for mismatches...")
-
-    discogs_release_ids = set(r["basic_information"]["id"] for r in collection)
-    notion_release_ids = set(notion_pages.keys())
-       
-    missing_in_notion = discogs_release_ids - notion_release_ids
-        
-    print(f"Unique Discogs release IDs: {len(discogs_release_ids)}")
-    print(f"Unique Notion Discogs IDs: {len(notion_release_ids)}")
-    print(f"Release IDs missing from Notion: {len(missing_in_notion)}")
-    print("Missing IDs:", list(missing_in_notion)[:20])
 
 
 def fetch_folder_options():
@@ -183,30 +177,6 @@ def update_folder_schema(new_folder, existing_options):
 
 
 # ---------------------------------------------------
-# FORMAT PARSER
-# ---------------------------------------------------
-
-def parse_formats(formats):
-    size = None
-    speed = None
-    details = []
-
-    if not formats:
-        return None, None, None
-
-    for fmt in formats:
-        for d in fmt.get("descriptions", []):
-            if '"' in d and not size:
-                size = d
-            elif "RPM" in d and not speed:
-                speed = d
-            else:
-                details.append(d)
-
-    return size, speed, ", ".join(details) if details else None
-
-
-# ---------------------------------------------------
 # MAIN
 # ---------------------------------------------------
 
@@ -225,50 +195,47 @@ def main():
     updated = 0
     failed = 0
 
-    print(f"Notion pages with Discogs ID found: {len(notion_pages)}")
-    print(f"Discogs collection count: {len(collection)}")
-    
-    for release in collection:
+    for item in collection:
         try:
-            basic = release["basic_information"]
-            release_id = basic["id"]
+            release_id = item["basic_information"]["id"]
+            folder_name = item.get("folder_name")
+            date_added = item.get("date_added")
 
+            full_release = get_release_details(release_id)
             lowest, median, highest = get_market_stats(release_id)
 
-            size, speed, details = parse_formats(basic.get("formats"))
-
-            labels = [l["name"] for l in basic.get("labels", [])]
-            label_text = ", ".join(labels)
-            catno = basic.get("labels", [{}])[0].get("catno", "")
-
-            folder_name = release.get("folder_name")
             if folder_name and folder_name not in folder_options:
                 print(f"Adding new folder option: {folder_name}")
                 update_folder_schema(folder_name, folder_options)
 
+            artists = ", ".join(a["name"] for a in full_release.get("artists", []))
+            labels = ", ".join(l["name"] for l in full_release.get("labels", []))
+            catno = full_release.get("labels", [{}])[0].get("catno", "")
+            formats = ", ".join(d for f in full_release.get("formats", []) for d in f.get("descriptions", []))
+
             properties = {
-                "Title": {"title": [{"text": {"content": basic.get("title", "")}}]},
-                "Artist": {"rich_text": [{"text": {"content": ", ".join(a["name"] for a in basic.get("artists", []))}}]},
+                "Title": {"title": [{"text": {"content": full_release.get("title", "")}}]},
+                "Artist": {"rich_text": [{"text": {"content": artists}}]},
                 "Discogs ID": {"number": release_id},
-                "Year": {"number": basic.get("year")},
-                "Label": {"rich_text": [{"text": {"content": label_text}}]},
-                "Country": {"rich_text": [{"text": {"content": basic.get("country", "")}}]},
-                "FormatSize": {"rich_text": [{"text": {"content": size or ""}}]},
-                "FormatSpeed": {"rich_text": [{"text": {"content": speed or ""}}]},
-                "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
+                "Year": {"number": full_release.get("year")},
+                "Country": {"rich_text": [{"text": {"content": full_release.get("country", "")}}]},
+                "Label": {"rich_text": [{"text": {"content": labels}}]},
+                "CatNo": {"rich_text": [{"text": {"content": catno}}]},
+                "FormatDetails": {"rich_text": [{"text": {"content": formats}}]},
+                "Folder": {"select": {"name": folder_name}} if folder_name else None,
                 "ValueLow": {"number": lowest},
                 "ValueMed": {"number": median},
                 "ValueHigh": {"number": highest},
-                "CatNo": {"rich_text": [{"text": {"content": catno}}]},
             }
+
+            properties = {k: v for k, v in properties.items() if v is not None}
 
             if release_id in notion_pages:
                 page_id = notion_pages[release_id]["id"]
                 notion_request("PATCH", f"{NOTION_BASE}/pages/{page_id}", {"properties": properties})
                 updated += 1
             else:
-                print(f"[CREATE] Release '{basic.get('title')}' ({release_id}) will be created")
-                properties["Added"] = {"date": {"start": release.get("date_added")}}
+                properties["Added"] = {"date": {"start": date_added}}
                 notion_request(
                     "POST",
                     f"{NOTION_BASE}/pages",
@@ -279,7 +246,7 @@ def main():
                 )
                 created += 1
 
-            time.sleep(0.5)
+            time.sleep(1)  # safer pacing for full-release architecture
 
         except Exception as e:
             print(f"[Release ERROR] ID {release_id}: {e}")
