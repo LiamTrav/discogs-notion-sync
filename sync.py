@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import requests
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
@@ -12,7 +13,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/2.0"
+    "User-Agent": "discogs-notion-sync/2.1"
 }
 
 headers_notion = {
@@ -69,6 +70,40 @@ def discogs_request(url, max_retries=5):
 
     print(f"[Discogs ERROR] Failed after retries for URL: {url}")
     return None
+
+
+# ---------------------------------------------------
+# FORMAT PARSER (RESTORED + ROBUST)
+# ---------------------------------------------------
+
+RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|45|78)\s?RPM\b", re.IGNORECASE)
+SIZE_PATTERN = re.compile(r'\b(7"|10"|12")\b')
+
+def parse_formats(formats):
+    size = None
+    speed = None
+    details = []
+
+    if not formats:
+        return None, None, None
+
+    for fmt in formats:
+        for desc in fmt.get("descriptions", []):
+
+            # Detect size (7", 10", 12")
+            if not size and SIZE_PATTERN.search(desc):
+                size = desc
+                continue
+
+            # Detect RPM (robust matching)
+            if not speed and RPM_PATTERN.search(desc.replace("⅓", " 1/3")):
+                speed = desc
+                continue
+
+            details.append(desc)
+
+    details_text = ", ".join(details) if details else None
+    return size, speed, details_text
 
 
 # ---------------------------------------------------
@@ -208,10 +243,11 @@ def main():
                 print(f"Adding new folder option: {folder_name}")
                 update_folder_schema(folder_name, folder_options)
 
+            size, speed, details = parse_formats(full_release.get("formats"))
+
             artists = ", ".join(a["name"] for a in full_release.get("artists", []))
             labels = ", ".join(l["name"] for l in full_release.get("labels", []))
             catno = full_release.get("labels", [{}])[0].get("catno", "")
-            formats = ", ".join(d for f in full_release.get("formats", []) for d in f.get("descriptions", []))
 
             properties = {
                 "Title": {"title": [{"text": {"content": full_release.get("title", "")}}]},
@@ -221,7 +257,9 @@ def main():
                 "Country": {"rich_text": [{"text": {"content": full_release.get("country", "")}}]},
                 "Label": {"rich_text": [{"text": {"content": labels}}]},
                 "CatNo": {"rich_text": [{"text": {"content": catno}}]},
-                "FormatDetails": {"rich_text": [{"text": {"content": formats}}]},
+                "FormatSize": {"rich_text": [{"text": {"content": size or ""}}]},
+                "FormatSpeed": {"rich_text": [{"text": {"content": speed or ""}}]},
+                "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
                 "Folder": {"select": {"name": folder_name}} if folder_name else None,
                 "ValueLow": {"number": lowest},
                 "ValueMed": {"number": median},
@@ -246,7 +284,7 @@ def main():
                 )
                 created += 1
 
-            time.sleep(1)  # safer pacing for full-release architecture
+            time.sleep(1)
 
         except Exception as e:
             print(f"[Release ERROR] ID {release_id}: {e}")
