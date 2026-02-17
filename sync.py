@@ -77,7 +77,7 @@ def discogs_request(url, max_retries=5):
 # ---------------------------------------------------
 
 RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|45|78)\s?RPM\b", re.IGNORECASE)
-SIZE_PATTERN = re.compile(r'\b(7"|10"|12")\b')
+SIZE_PATTERN = re.compile(r'(7"|10"|12")')
 
 def parse_formats(formats):
     size = None
@@ -237,7 +237,8 @@ def main():
             date_added = item.get("date_added")
 
             full_release = get_release_details(release_id)
-            lowest, median, highest = get_market_stats(release_id)
+            lowest, _, _ = get_market_stats(release_id)
+            median, high = get_price_suggestions(release_id)
 
             if folder_name and folder_name not in folder_options:
                 print(f"Adding new folder option: {folder_name}")
@@ -263,7 +264,8 @@ def main():
                 "Folder": {"select": {"name": folder_name}} if folder_name else None,
                 "ValueLow": {"number": lowest},
                 "ValueMed": {"number": median},
-                "ValueHigh": {"number": highest},
+                "ValueHigh": {"number": high},
+
             }
 
             properties = {k: v for k, v in properties.items() if v is not None}
