@@ -77,7 +77,7 @@ def discogs_request(url, max_retries=5):
 # ---------------------------------------------------
 
 RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|45|78)\s?RPM\b", re.IGNORECASE)
-SIZE_PATTERN = re.compile(r'\b(7"|10"|12")\b')
+SIZE_PATTERN = re.compile(r'(7"|10"|12")')
 
 def parse_formats(formats):
     size = None
