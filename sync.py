@@ -153,6 +153,35 @@ def get_market_stats(release_id):
 
     return lowest, median, highest
 
+def get_price_suggestions(release_id):
+    """
+    Fetch price suggestions for a release.
+    Returns (low, median, high) in GBP.
+    """
+    url = f"https://api.discogs.com/marketplace/price_suggestions/{release_id}"
+    data = discogs_get(url)
+
+    if not data:
+        return None, None, None
+
+    # Prefer Near Mint pricing
+    nm = data.get("Near Mint (NM or M-)")
+    if nm:
+        return (
+            nm.get("value"),
+            nm.get("median"),
+            nm.get("max")
+        )
+
+    # Fallback: use any available condition
+    for condition in data.values():
+        return (
+            condition.get("value"),
+            condition.get("median"),
+            condition.get("max")
+        )
+
+    return None, None, None
 
 # ---------------------------------------------------
 # NOTION
