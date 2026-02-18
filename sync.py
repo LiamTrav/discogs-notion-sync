@@ -140,50 +140,6 @@ def get_release_details(release_id):
     return r.json()
 
 
-def get_market_stats(release_id):
-    url = f"{DISCOGS_BASE}/marketplace/stats/{release_id}"
-    r = discogs_request(url)
-    if not r:
-        return None, None, None
-
-    data = r.json()
-    lowest = data.get("lowest_price", {}).get("value") if data.get("lowest_price") else None
-    median = data.get("median_price", {}).get("value") if data.get("median_price") else None
-    highest = data.get("highest_price", {}).get("value") if data.get("highest_price") else None
-
-    return lowest, median, highest
-
-def get_price_suggestions(release_id):
-    """
-    Fetch price suggestions for a release.
-    Returns (low, median, high) in GBP.
-    """
-    url = f"{DISCOGS_BASE}/marketplace/price_suggestions/{release_id}"
-    r = discogs_request(url)
-
-    if not r:
-        return None, None, None
-
-    data = r.json()
-
-    # Prefer Near Mint pricing
-    nm = data.get("Near Mint (NM or M-)")
-    if nm:
-        return (
-            nm.get("value"),
-            nm.get("median"),
-            nm.get("max")
-        )
-
-    # Fallback: first available condition
-    for condition in data.values():
-        return (
-            condition.get("value"),
-            condition.get("median"),
-            condition.get("max")
-        )
-
-    return None, None, None
 
 # ---------------------------------------------------
 # NOTION
