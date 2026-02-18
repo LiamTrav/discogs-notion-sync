@@ -158,11 +158,13 @@ def get_price_suggestions(release_id):
     Fetch price suggestions for a release.
     Returns (low, median, high) in GBP.
     """
-    url = f"https://api.discogs.com/marketplace/price_suggestions/{release_id}"
-    data = discogs_get(url)
+    url = f"{DISCOGS_BASE}/marketplace/price_suggestions/{release_id}"
+    r = discogs_request(url)
 
-    if not data:
+    if not r:
         return None, None, None
+
+    data = r.json()
 
     # Prefer Near Mint pricing
     nm = data.get("Near Mint (NM or M-)")
@@ -173,7 +175,7 @@ def get_price_suggestions(release_id):
             nm.get("max")
         )
 
-    # Fallback: use any available condition
+    # Fallback: first available condition
     for condition in data.values():
         return (
             condition.get("value"),
