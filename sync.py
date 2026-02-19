@@ -13,7 +13,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/3.3"
+    "User-Agent": "discogs-notion-sync/3.4"
 }
 
 headers_notion = {
@@ -63,9 +63,7 @@ def discogs_request(url, max_retries=5):
 
             r.raise_for_status()
 
-            # Throttle ~1.1/sec
-            time.sleep(1.1)
-
+            time.sleep(1.1)  # Throttle ~1.1/sec
             return r
 
         except requests.exceptions.RequestException as e:
@@ -78,10 +76,14 @@ def discogs_request(url, max_retries=5):
 
 
 # ---------------------------------------------------
-# FORMAT PARSER
+# FORMAT PARSER (FIXED RPM LOGIC)
 # ---------------------------------------------------
 
-RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|45|78)\s?RPM\b", re.IGNORECASE)
+RPM_PATTERN = re.compile(
+    r"\b(33\s?⅓|33\s?1/3|33|45|78)\s?RPM\b",
+    re.IGNORECASE
+)
+
 SIZE_PATTERN = re.compile(r'\b(7"|10"|12")')
 
 def parse_formats(formats):
@@ -94,11 +96,14 @@ def parse_formats(formats):
 
     for fmt in formats:
         for desc in fmt.get("descriptions", []):
+
+            normalized = desc.replace("⅓", "1/3")
+
             if not size and SIZE_PATTERN.search(desc):
                 size = desc
                 continue
 
-            if not speed and RPM_PATTERN.search(desc.replace("⅓", " 1/3")):
+            if not speed and RPM_PATTERN.search(normalized):
                 speed = desc
                 continue
 
@@ -113,16 +118,12 @@ def parse_formats(formats):
 
 def get_folder_map():
     r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders")
-    if not r:
-        return {}
-    return {f["id"]: f["name"] for f in r.json().get("folders", [])}
+    return {f["id"]: f["name"] for f in r.json().get("folders", [])} if r else {}
 
 
 def get_collection_fields():
     r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/fields")
-    if not r:
-        return {}
-    return {f["id"]: f["name"] for f in r.json().get("fields", [])}
+    return {f["id"]: f["name"] for f in r.json().get("fields", [])} if r else {}
 
 
 def get_full_collection():
@@ -191,22 +192,6 @@ def fetch_select_options(property_name):
     return set(o["name"] for o in db["properties"][property_name]["select"]["options"])
 
 
-def update_select_schema(property_name, new_value, existing_options):
-    existing_options.add(new_value)
-
-    payload = {
-        "properties": {
-            property_name: {
-                "select": {
-                    "options": [{"name": name} for name in existing_options]
-                }
-            }
-        }
-    }
-
-    notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
-
-
 def fetch_all_notion_pages():
     pages = {}
     has_more = True
@@ -248,14 +233,9 @@ def main():
     field_map = get_collection_fields()
     notion_pages = fetch_all_notion_pages()
 
-    folder_options = fetch_select_options("Folder")
-    media_options = fetch_select_options("Media Condition")
-    sleeve_options = fetch_select_options("Sleeve Condition")
-    genre_options = fetch_select_options("Genre")
-    style_options = fetch_select_options("Style")
-
     created = 0
     updated = 0
+    failed = 0
 
     for item in collection:
         try:
@@ -263,9 +243,6 @@ def main():
             folder_name = folder_map.get(item.get("folder_id"))
             date_added = item.get("date_added")
 
-            # -----------------------------
-            # CLEAN CONDITION SPLIT
-            # -----------------------------
             media_condition = None
             sleeve_condition = None
             true_notes = []
@@ -284,7 +261,6 @@ def main():
                 else:
                     true_notes.append(value.strip())
 
-            # IMPORTANT: Only non-condition notes stored
             notes = "\n".join(true_notes) if true_notes else None
 
             full_release = get_release_details(release_id)
@@ -329,23 +305,33 @@ def main():
 
             if release_id in notion_pages:
                 page_id = notion_pages[release_id]["id"]
-                notion_request("PATCH", f"{NOTION_BASE}/pages/{page_id}", {"properties": properties})
-                updated += 1
+                r = notion_request("PATCH", f"{NOTION_BASE}/pages/{page_id}", {"properties": properties})
+                if r:
+                    updated += 1
+                else:
+                    print(f"[Notion Update Failed] {release_id}")
+                    failed += 1
             else:
                 properties["Added"] = {"date": {"start": date_added}}
-                notion_request(
+                r = notion_request(
                     "POST",
                     f"{NOTION_BASE}/pages",
                     {"parent": {"database_id": DATABASE_ID}, "properties": properties}
                 )
-                created += 1
+                if r:
+                    created += 1
+                else:
+                    print(f"[Notion Create Failed] {release_id}")
+                    failed += 1
 
         except Exception as e:
             print(f"[Release ERROR] ID {release_id}: {e}")
+            failed += 1
 
     print("Sync complete.")
     print(f"Created: {created}")
     print(f"Updated: {updated}")
+    print(f"Failed: {failed}")
 
 
 if __name__ == "__main__":
