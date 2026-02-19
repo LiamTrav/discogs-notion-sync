@@ -13,7 +13,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/2.1"
+    "User-Agent": "discogs-notion-sync/2.2"
 }
 
 headers_notion = {
@@ -23,7 +23,7 @@ headers_notion = {
 }
 
 # ---------------------------------------------------
-# RETRY HELPERS
+# RETRY HELPERS (UNCHANGED)
 # ---------------------------------------------------
 
 def notion_request(method, url, payload=None, max_retries=5):
@@ -73,7 +73,7 @@ def discogs_request(url, max_retries=5):
 
 
 # ---------------------------------------------------
-# FORMAT PARSER (RESTORED + ROBUST)
+# FORMAT PARSER (UNCHANGED)
 # ---------------------------------------------------
 
 RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|45|78)\s?RPM\b", re.IGNORECASE)
@@ -90,12 +90,10 @@ def parse_formats(formats):
     for fmt in formats:
         for desc in fmt.get("descriptions", []):
 
-            # Detect size (7", 10", 12")
             if not size and SIZE_PATTERN.search(desc):
                 size = desc
                 continue
 
-            # Detect RPM (robust matching)
             if not speed and RPM_PATTERN.search(desc.replace("⅓", " 1/3")):
                 speed = desc
                 continue
@@ -107,8 +105,18 @@ def parse_formats(formats):
 
 
 # ---------------------------------------------------
-# DISCOGS
+# DISCOGS (UPDATED FOLDER LOGIC)
 # ---------------------------------------------------
+
+def get_folder_map():
+    url = f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders"
+    r = discogs_request(url)
+    if not r:
+        return {}
+
+    folders = r.json().get("folders", [])
+    return {f["id"]: f["name"] for f in folders}
+
 
 def get_full_collection():
     releases = []
@@ -141,16 +149,7 @@ def get_release_details(release_id):
 
 
 def get_market_stats(release_id):
-    """
-    Combines:
-    - Historic lowest sale price from marketplace/stats
-    - VG+ valuation from price_suggestions
-    - Mint valuation from price_suggestions
-    """
 
-    # -----------------------------------------
-    # 1) Historic lowest sale price
-    # -----------------------------------------
     stats_url = f"{DISCOGS_BASE}/marketplace/stats/{release_id}"
     r_stats = discogs_request(stats_url)
 
@@ -161,9 +160,6 @@ def get_market_stats(release_id):
         if lowest_obj:
             lowest = lowest_obj.get("value")
 
-    # -----------------------------------------
-    # 2) Condition-based valuations
-    # -----------------------------------------
     price_url = f"{DISCOGS_BASE}/marketplace/price_suggestions/{release_id}"
     r_price = discogs_request(price_url)
 
@@ -173,20 +169,19 @@ def get_market_stats(release_id):
     if r_price:
         price_data = r_price.json()
 
-        # Very Good Plus (VG+)
         vg_plus = price_data.get("Very Good Plus (VG+)")
         if vg_plus:
             median = vg_plus.get("value")
 
-        # Mint (M)
         mint = price_data.get("Mint (M)")
         if mint:
             highest = mint.get("value")
 
     return lowest, median, highest
 
+
 # ---------------------------------------------------
-# NOTION
+# NOTION (UNCHANGED)
 # ---------------------------------------------------
 
 def fetch_all_notion_pages():
@@ -243,13 +238,16 @@ def update_folder_schema(new_folder, existing_options):
 
 
 # ---------------------------------------------------
-# MAIN
+# MAIN (FOLDER + NOTES FIXED)
 # ---------------------------------------------------
 
 def main():
     print("Fetching Discogs collection...")
     collection = get_full_collection()
     print(f"Total releases identified in Discogs: {len(collection)}")
+
+    print("Fetching folder map...")
+    folder_map = get_folder_map()
 
     print("Fetching existing Notion pages...")
     notion_pages = fetch_all_notion_pages()
@@ -264,8 +262,13 @@ def main():
     for item in collection:
         try:
             release_id = item["basic_information"]["id"]
-            folder_name = item.get("folder_name")
+            folder_id = item.get("folder_id")
+            folder_name = folder_map.get(folder_id)
             date_added = item.get("date_added")
+
+            # ✅ FIXED NOTES
+            notes_raw = item.get("notes", [])
+            notes = ", ".join(n.get("value", "") for n in notes_raw) if notes_raw else ""
 
             full_release = get_release_details(release_id)
             lowest, median, highest = get_market_stats(release_id)
@@ -292,6 +295,7 @@ def main():
                 "FormatSpeed": {"rich_text": [{"text": {"content": speed or ""}}]},
                 "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
                 "Folder": {"select": {"name": folder_name}} if folder_name else None,
+                "Notes": {"rich_text": [{"text": {"content": notes}}]},
                 "ValueLow": {"number": lowest},
                 "ValueMed": {"number": median},
                 "ValueHigh": {"number": highest},
