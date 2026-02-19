@@ -13,7 +13,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/3.4"
+    "User-Agent": "discogs-notion-sync/3.5"
 }
 
 headers_notion = {
@@ -62,8 +62,7 @@ def discogs_request(url, max_retries=5):
                 raise requests.exceptions.HTTPError(f"{r.status_code} error")
 
             r.raise_for_status()
-
-            time.sleep(1.1)  # Throttle ~1.1/sec
+            time.sleep(1.1)
             return r
 
         except requests.exceptions.RequestException as e:
@@ -76,14 +75,10 @@ def discogs_request(url, max_retries=5):
 
 
 # ---------------------------------------------------
-# FORMAT PARSER (FIXED RPM LOGIC)
+# FORMAT PARSER
 # ---------------------------------------------------
 
-RPM_PATTERN = re.compile(
-    r"\b(33\s?⅓|33\s?1/3|33|45|78)\s?RPM\b",
-    re.IGNORECASE
-)
-
+RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|33|45|78)\s?RPM\b", re.IGNORECASE)
 SIZE_PATTERN = re.compile(r'\b(7"|10"|12")')
 
 def parse_formats(formats):
@@ -183,15 +178,6 @@ def get_market_stats(release_id):
 # NOTION HELPERS
 # ---------------------------------------------------
 
-def fetch_select_options(property_name):
-    r = notion_request("GET", f"{NOTION_BASE}/databases/{DATABASE_ID}")
-    if not r:
-        return set()
-
-    db = r.json()
-    return set(o["name"] for o in db["properties"][property_name]["select"]["options"])
-
-
 def fetch_all_notion_pages():
     pages = {}
     has_more = True
@@ -209,9 +195,9 @@ def fetch_all_notion_pages():
         data = r.json()
 
         for result in data.get("results", []):
-            discogs_id = result["properties"]["Discogs ID"]["number"]
-            if discogs_id:
-                pages[discogs_id] = result
+            instance_id = result["properties"].get("Instance ID", {}).get("number")
+            if instance_id:
+                pages[instance_id] = result
 
         has_more = data.get("has_more")
         start_cursor = data.get("next_cursor")
@@ -240,6 +226,7 @@ def main():
     for item in collection:
         try:
             release_id = item["basic_information"]["id"]
+            instance_id = item["instance_id"]
             folder_name = folder_map.get(item.get("folder_id"))
             date_added = item.get("date_added")
 
@@ -283,6 +270,7 @@ def main():
                 "Title": {"title": [{"text": {"content": full_release.get("title", "")}}]},
                 "Artist": {"rich_text": [{"text": {"content": artists}}]},
                 "Discogs ID": {"number": release_id},
+                "Instance ID": {"number": instance_id},
                 "Year": {"number": full_release.get("year")},
                 "Country": {"rich_text": [{"text": {"content": full_release.get("country", "")}}]},
                 "Label": {"rich_text": [{"text": {"content": label_names}}]},
@@ -303,13 +291,13 @@ def main():
 
             properties = {k: v for k, v in properties.items() if v is not None}
 
-            if release_id in notion_pages:
-                page_id = notion_pages[release_id]["id"]
+            if instance_id in notion_pages:
+                page_id = notion_pages[instance_id]["id"]
                 r = notion_request("PATCH", f"{NOTION_BASE}/pages/{page_id}", {"properties": properties})
                 if r:
                     updated += 1
                 else:
-                    print(f"[Notion Update Failed] {release_id}")
+                    print(f"[Notion Update Failed] Instance {instance_id}")
                     failed += 1
             else:
                 properties["Added"] = {"date": {"start": date_added}}
@@ -321,11 +309,11 @@ def main():
                 if r:
                     created += 1
                 else:
-                    print(f"[Notion Create Failed] {release_id}")
+                    print(f"[Notion Create Failed] Instance {instance_id}")
                     failed += 1
 
         except Exception as e:
-            print(f"[Release ERROR] ID {release_id}: {e}")
+            print(f"[Release ERROR] Instance {instance_id}: {e}")
             failed += 1
 
     print("Sync complete.")
