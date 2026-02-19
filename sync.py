@@ -13,7 +13,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/3.2"
+    "User-Agent": "discogs-notion-sync/3.3"
 }
 
 headers_notion = {
@@ -63,7 +63,7 @@ def discogs_request(url, max_retries=5):
 
             r.raise_for_status()
 
-            # Throttle to ~1.1 requests/sec
+            # Throttle ~1.1/sec
             time.sleep(1.1)
 
             return r
@@ -85,12 +85,12 @@ RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|45|78)\s?RPM\b", re.IGNORECASE)
 SIZE_PATTERN = re.compile(r'\b(7"|10"|12")')
 
 def parse_formats(formats):
+    if not formats:
+        return None, None, None
+
     size = None
     speed = None
     details = []
-
-    if not formats:
-        return None, None, None
 
     for fmt in formats:
         for desc in fmt.get("descriptions", []):
@@ -108,7 +108,7 @@ def parse_formats(formats):
 
 
 # ---------------------------------------------------
-# DISCOGS
+# DISCOGS HELPERS
 # ---------------------------------------------------
 
 def get_folder_map():
@@ -263,6 +263,9 @@ def main():
             folder_name = folder_map.get(item.get("folder_id"))
             date_added = item.get("date_added")
 
+            # -----------------------------
+            # CLEAN CONDITION SPLIT
+            # -----------------------------
             media_condition = None
             sleeve_condition = None
             true_notes = []
@@ -275,12 +278,13 @@ def main():
                     continue
 
                 if field_name == "Media Condition":
-                    media_condition = value
+                    media_condition = value.strip()
                 elif field_name == "Sleeve Condition":
-                    sleeve_condition = value
+                    sleeve_condition = value.strip()
                 else:
-                    true_notes.append(value)
+                    true_notes.append(value.strip())
 
+            # IMPORTANT: Only non-condition notes stored
             notes = "\n".join(true_notes) if true_notes else None
 
             full_release = get_release_details(release_id)
@@ -290,24 +294,9 @@ def main():
             styles = full_release.get("styles") or []
             labels = full_release.get("labels") or []
 
-            genre = genres[0] if len(genres) > 0 else None
-            style = styles[0] if len(styles) > 0 else None
-            catno = labels[0].get("catno") if len(labels) > 0 else ""
-
-            if folder_name and folder_name not in folder_options:
-                update_select_schema("Folder", folder_name, folder_options)
-
-            if media_condition and media_condition not in media_options:
-                update_select_schema("Media Condition", media_condition, media_options)
-
-            if sleeve_condition and sleeve_condition not in sleeve_options:
-                update_select_schema("Sleeve Condition", sleeve_condition, sleeve_options)
-
-            if genre and genre not in genre_options:
-                update_select_schema("Genre", genre, genre_options)
-
-            if style and style not in style_options:
-                update_select_schema("Style", style, style_options)
+            genre = genres[0] if genres else None
+            style = styles[0] if styles else None
+            catno = labels[0].get("catno") if labels else ""
 
             size, speed, details = parse_formats(full_release.get("formats"))
 
