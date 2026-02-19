@@ -13,7 +13,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/3.0"
+    "User-Agent": "discogs-notion-sync/3.1"
 }
 
 headers_notion = {
@@ -23,7 +23,7 @@ headers_notion = {
 }
 
 # ---------------------------------------------------
-# RETRY HELPERS (UNCHANGED)
+# RETRY HELPERS
 # ---------------------------------------------------
 
 def notion_request(method, url, payload=None, max_retries=5):
@@ -73,7 +73,7 @@ def discogs_request(url, max_retries=5):
 
 
 # ---------------------------------------------------
-# FORMAT PARSER (UNCHANGED)
+# FORMAT PARSER
 # ---------------------------------------------------
 
 RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|45|78)\s?RPM\b", re.IGNORECASE)
@@ -180,7 +180,7 @@ def get_market_stats(release_id):
 
 
 # ---------------------------------------------------
-# NOTION SELECT HELPERS
+# NOTION HELPERS
 # ---------------------------------------------------
 
 def fetch_select_options(property_name):
@@ -207,6 +207,33 @@ def update_select_schema(property_name, new_value, existing_options):
     }
 
     notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
+
+
+def fetch_all_notion_pages():
+    pages = {}
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+        payload = {"page_size": 100}
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        r = notion_request("POST", f"{NOTION_BASE}/databases/{DATABASE_ID}/query", payload)
+        if not r:
+            break
+
+        data = r.json()
+
+        for result in data["results"]:
+            discogs_id = result["properties"]["Discogs ID"]["number"]
+            if discogs_id:
+                pages[discogs_id] = result
+
+        has_more = data.get("has_more")
+        start_cursor = data.get("next_cursor")
+
+    return pages
 
 
 # ---------------------------------------------------
@@ -240,19 +267,28 @@ def main():
             date_added = item.get("date_added")
 
             # -----------------------------
-            # CONDITION SPLIT
+            # SPLIT CONDITIONS + TRUE NOTES
             # -----------------------------
             media_condition = None
             sleeve_condition = None
+            true_notes = []
 
             for n in item.get("notes", []):
-                field_name = field_map.get(n.get("field_id"))
+                field_id = n.get("field_id")
+                field_name = field_map.get(field_id)
                 value = n.get("value")
+
+                if not value:
+                    continue
 
                 if field_name == "Media Condition":
                     media_condition = value
                 elif field_name == "Sleeve Condition":
                     sleeve_condition = value
+                else:
+                    true_notes.append(value)
+
+            notes = "\n".join(true_notes) if true_notes else None
 
             # Ensure select options exist
             if folder_name and folder_name not in folder_options:
@@ -267,9 +303,6 @@ def main():
             full_release = get_release_details(release_id)
             lowest, median, highest = get_market_stats(release_id)
 
-            # -----------------------------
-            # GENRE + STYLE
-            # -----------------------------
             genre = full_release.get("genres", [None])[0]
             style = full_release.get("styles", [None])[0]
 
@@ -301,6 +334,7 @@ def main():
                 "Sleeve Condition": {"select": {"name": sleeve_condition}} if sleeve_condition else None,
                 "Genre": {"select": {"name": genre}} if genre else None,
                 "Style": {"select": {"name": style}} if style else None,
+                "Notes": {"rich_text": [{"text": {"content": notes}}]} if notes else None,
                 "ValueLow": {"number": lowest},
                 "ValueMed": {"number": median},
                 "ValueHigh": {"number": highest},
@@ -329,33 +363,6 @@ def main():
     print("Sync complete.")
     print(f"Created: {created}")
     print(f"Updated: {updated}")
-
-
-def fetch_all_notion_pages():
-    pages = {}
-    has_more = True
-    start_cursor = None
-
-    while has_more:
-        payload = {"page_size": 100}
-        if start_cursor:
-            payload["start_cursor"] = start_cursor
-
-        r = notion_request("POST", f"{NOTION_BASE}/databases/{DATABASE_ID}/query", payload)
-        if not r:
-            break
-
-        data = r.json()
-
-        for result in data["results"]:
-            discogs_id = result["properties"]["Discogs ID"]["number"]
-            if discogs_id:
-                pages[discogs_id] = result
-
-        has_more = data.get("has_more")
-        start_cursor = data.get("next_cursor")
-
-    return pages
 
 
 if __name__ == "__main__":
