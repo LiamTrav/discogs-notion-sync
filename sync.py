@@ -141,18 +141,49 @@ def get_release_details(release_id):
 
 
 def get_market_stats(release_id):
-    url = f"{DISCOGS_BASE}/marketplace/stats/{release_id}"
-    r = discogs_request(url)
-    if not r:
-        return None, None, None
+    """
+    Combines:
+    - Historic lowest sale price from marketplace/stats
+    - VG+ valuation from price_suggestions
+    - Mint valuation from price_suggestions
+    """
 
-    data = r.json()
-    lowest = data.get("lowest_price", {}).get("value") if data.get("lowest_price") else None
-    median = data.get("median_price", {}).get("value") if data.get("median_price") else None
-    highest = data.get("highest_price", {}).get("value") if data.get("highest_price") else None
+    # -----------------------------------------
+    # 1) Historic lowest sale price
+    # -----------------------------------------
+    stats_url = f"{DISCOGS_BASE}/marketplace/stats/{release_id}"
+    r_stats = discogs_request(stats_url)
+
+    lowest = None
+    if r_stats:
+        stats_data = r_stats.json()
+        lowest_obj = stats_data.get("lowest_price")
+        if lowest_obj:
+            lowest = lowest_obj.get("value")
+
+    # -----------------------------------------
+    # 2) Condition-based valuations
+    # -----------------------------------------
+    price_url = f"{DISCOGS_BASE}/marketplace/price_suggestions/{release_id}"
+    r_price = discogs_request(price_url)
+
+    median = None
+    highest = None
+
+    if r_price:
+        price_data = r_price.json()
+
+        # Very Good Plus (VG+)
+        vg_plus = price_data.get("Very Good Plus (VG+)")
+        if vg_plus:
+            median = vg_plus.get("value")
+
+        # Mint (M)
+        mint = price_data.get("Mint (M)")
+        if mint:
+            highest = mint.get("value")
 
     return lowest, median, highest
-
 
 # ---------------------------------------------------
 # NOTION
