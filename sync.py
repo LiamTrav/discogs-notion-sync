@@ -302,4 +302,14 @@ def main():
                     failed += 1
 
         except Exception as e:
-            pri
+            print(f"[Release ERROR] Instance {instance_id}: {e}")
+            failed += 1
+
+    print("Sync complete.")
+    print("Created:", created)
+    print("Updated:", updated)
+    print("Failed:", failed)
+
+
+if __name__ == "__main__":
+    main()
