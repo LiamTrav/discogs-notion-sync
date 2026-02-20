@@ -41,8 +41,12 @@ def notion_request(method, url, payload=None, max_retries=5):
             if r.status_code >= 500 or r.status_code == 429:
                 raise requests.exceptions.HTTPError(f"{r.status_code} error")
 
-            r.raise_for_status()
-            return r
+            if not r.ok:
+                print("NOTION RESPONSE ERROR:")
+                print("Status:", r.status_code)
+                print("Body:", r.text)
+                r.raise_for_status()
+
 
         except requests.exceptions.RequestException as e:
             wait = 2 ** attempt
