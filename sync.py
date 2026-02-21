@@ -18,7 +18,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/5.0"
+    "User-Agent": "discogs-notion-sync/5.1"
 }
 
 headers_notion = {
@@ -43,7 +43,6 @@ def discogs_request(url):
 
         remaining = r.headers.get("X-Discogs-Ratelimit-Remaining")
         if remaining and int(remaining) < 3:
-            print("Approaching rate limit. Sleeping 5s")
             time.sleep(5)
 
         if not r.ok:
@@ -59,6 +58,14 @@ def notion_request(method, url, payload=None):
         print("NOTION ERROR:", r.status_code, r.text)
         return None
     return r
+
+
+# ---------------------------------------------------
+# UTIL
+# ---------------------------------------------------
+
+def clean_commas(value):
+    return value.replace(",", "").strip() if value else value
 
 
 # ---------------------------------------------------
@@ -94,7 +101,7 @@ def parse_formats(formats):
 
 
 # ---------------------------------------------------
-# PHASE 1 — FETCH COLLECTION
+# DISCOGS FETCH
 # ---------------------------------------------------
 
 def get_full_collection():
@@ -133,28 +140,41 @@ def get_collection_fields():
 
 def fetch_existing_pages():
     pages = {}
-    r = notion_request("POST", f"{NOTION_BASE}/databases/{DATABASE_ID}/query", {"page_size": 100})
-    if not r:
-        return pages
+    has_more = True
+    start_cursor = None
 
-    for result in r.json().get("results", []):
-        instance_id = result["properties"]["Instance ID"]["number"]
-        if instance_id:
-            pages[instance_id] = result["id"]
+    while has_more:
+        payload = {"page_size": 100}
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
 
+        r = notion_request(
+            "POST",
+            f"{NOTION_BASE}/databases/{DATABASE_ID}/query",
+            payload
+        )
+        if not r:
+            break
+
+        data = r.json()
+
+        for result in data.get("results", []):
+            instance_id = result["properties"]["Instance ID"]["number"]
+            if instance_id:
+                pages[instance_id] = result["id"]
+
+        has_more = data.get("has_more")
+        start_cursor = data.get("next_cursor")
+
+    print("Existing Notion pages fetched:", len(pages))
     return pages
 
 
-def fetch_schema():
-    r = notion_request("GET", f"{NOTION_BASE}/databases/{DATABASE_ID}")
-    return r.json() if r else {}
-
-
-def update_schema_multi_select(property_name, values):
+def update_schema_select(property_name, values):
     payload = {
         "properties": {
             property_name: {
-                "multi_select": {
+                "select": {
                     "options": [{"name": v} for v in sorted(values)]
                 }
             }
@@ -163,11 +183,11 @@ def update_schema_multi_select(property_name, values):
     notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
 
 
-def update_schema_select(property_name, values):
+def update_schema_multi_select(property_name, values):
     payload = {
         "properties": {
             property_name: {
-                "select": {
+                "multi_select": {
                     "options": [{"name": v} for v in sorted(values)]
                 }
             }
@@ -192,9 +212,7 @@ def main():
     unique_selects = defaultdict(set)
     processed_items = []
 
-    # -------------------------------
-    # SCAN & COLLECT UNIQUE VALUES
-    # -------------------------------
+    # -------- SCAN PHASE --------
 
     for item in collection:
 
@@ -222,19 +240,15 @@ def main():
 
         notes = "\n".join(true_notes) if true_notes else None
 
-        genres = basic.get("genres") or []
-        styles = basic.get("styles") or []
+        genres = [clean_commas(g) for g in (basic.get("genres") or [])]
+        styles = [clean_commas(s) for s in (basic.get("styles") or [])]
+
         labels = basic.get("labels") or []
-
-        genre_values = genres
-        style_values = styles
-
         country = basic.get("country")
         catno = labels[0].get("catno") if labels else ""
 
         size, speed, details = parse_formats(basic.get("formats"))
 
-        # Collect unique select values
         for field, value in [
             ("Folder", folder),
             ("Media Condition", media),
@@ -246,10 +260,9 @@ def main():
             if value:
                 unique_selects[field].add(value)
 
-        for g in genre_values:
+        for g in genres:
             unique_selects["Genre"].add(g)
-
-        for s in style_values:
+        for s in styles:
             unique_selects["Style"].add(s)
 
         processed_items.append({
@@ -260,8 +273,8 @@ def main():
             "year": basic.get("year"),
             "label": ", ".join(l["name"] for l in labels),
             "catno": catno,
-            "genres": genre_values,
-            "styles": style_values,
+            "genres": genres,
+            "styles": styles,
             "country": country,
             "folder": folder,
             "media": media,
@@ -273,9 +286,7 @@ def main():
             "added": date_added
         })
 
-    # -------------------------------
-    # PHASE 2 — SYNC SCHEMA
-    # -------------------------------
+    # -------- SCHEMA PHASE --------
 
     print("Phase 2 — Syncing schema")
 
@@ -286,13 +297,12 @@ def main():
     update_schema_multi_select("Genre", unique_selects["Genre"])
     update_schema_multi_select("Style", unique_selects["Style"])
 
-    # -------------------------------
-    # PHASE 3 — WRITE PAGES
-    # -------------------------------
+    # -------- WRITE PHASE --------
 
     print("Phase 3 — Writing pages")
 
     notion_pages = fetch_existing_pages()
+
     created = updated = failed = 0
 
     for item in processed_items:
@@ -307,18 +317,24 @@ def main():
             "CatNo": {"rich_text": [{"text": {"content": item["catno"] or ""}}]},
             "FormatDetails": {"rich_text": [{"text": {"content": item["details"] or ""}}]},
             "Added": {"date": {"start": item["added"]}},
-            "Notes": {"rich_text": [{"text": {"content": item["notes"]}}]} if item["notes"] else None,
-            "Folder": {"select": {"name": item["folder"]}} if item["folder"] else None,
-            "Media Condition": {"select": {"name": item["media"]}} if item["media"] else None,
-            "Sleeve Condition": {"select": {"name": item["sleeve"]}} if item["sleeve"] else None,
-            "Country": {"select": {"name": item["country"]}} if item["country"] else None,
-            "FormatSpeed": {"select": {"name": item["speed"]}} if item["speed"] else None,
-            "FormatSize": {"select": {"name": item["size"]}} if item["size"] else None,
             "Genre": {"multi_select": [{"name": g} for g in item["genres"]]},
             "Style": {"multi_select": [{"name": s} for s in item["styles"]]},
         }
 
-        properties = {k: v for k, v in properties.items() if v is not None}
+        if item["folder"]:
+            properties["Folder"] = {"select": {"name": item["folder"]}}
+        if item["media"]:
+            properties["Media Condition"] = {"select": {"name": item["media"]}}
+        if item["sleeve"]:
+            properties["Sleeve Condition"] = {"select": {"name": item["sleeve"]}}
+        if item["country"]:
+            properties["Country"] = {"select": {"name": item["country"]}}
+        if item["speed"]:
+            properties["FormatSpeed"] = {"select": {"name": item["speed"]}}
+        if item["size"]:
+            properties["FormatSize"] = {"select": {"name": item["size"]}}
+        if item["notes"]:
+            properties["Notes"] = {"rich_text": [{"text": {"content": item["notes"]}}]}
 
         if item["instance_id"] in notion_pages:
             r = notion_request(
@@ -326,23 +342,14 @@ def main():
                 f"{NOTION_BASE}/pages/{notion_pages[item['instance_id']]}",
                 {"properties": properties}
             )
-            if r:
-                updated += 1
-            else:
-                failed += 1
+            updated += 1 if r else 0
         else:
             r = notion_request(
                 "POST",
                 f"{NOTION_BASE}/pages",
-                {
-                    "parent": {"database_id": DATABASE_ID},
-                    "properties": properties
-                }
+                {"parent": {"database_id": DATABASE_ID}, "properties": properties}
             )
-            if r:
-                created += 1
-            else:
-                failed += 1
+            created += 1 if r else 0
 
     print("Sync complete.")
     print("Created:", created)
