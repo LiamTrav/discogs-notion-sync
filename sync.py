@@ -2,6 +2,7 @@ import os
 import time
 import re
 import requests
+from collections import defaultdict
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -11,9 +12,13 @@ USERNAME = os.environ["DISCOGS_USERNAME"]
 DISCOGS_BASE = "https://api.discogs.com"
 NOTION_BASE = "https://api.notion.com/v1"
 
+# ---------------------------------------------------
+# HEADERS
+# ---------------------------------------------------
+
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/4.0"
+    "User-Agent": "discogs-notion-sync/5.0"
 }
 
 headers_notion = {
@@ -23,23 +28,36 @@ headers_notion = {
 }
 
 # ---------------------------------------------------
-# REQUEST HELPERS
+# SMART REQUEST HELPERS
 # ---------------------------------------------------
+
+def discogs_request(url):
+    while True:
+        r = requests.get(url, headers=headers_discogs)
+
+        if r.status_code == 429:
+            retry = int(r.headers.get("Retry-After", 5))
+            print(f"Rate limited. Sleeping {retry}s")
+            time.sleep(retry)
+            continue
+
+        remaining = r.headers.get("X-Discogs-Ratelimit-Remaining")
+        if remaining and int(remaining) < 3:
+            print("Approaching rate limit. Sleeping 5s")
+            time.sleep(5)
+
+        if not r.ok:
+            print("DISCOGS ERROR:", r.status_code, r.text)
+            return None
+
+        return r
+
 
 def notion_request(method, url, payload=None):
     r = requests.request(method, url, headers=headers_notion, json=payload)
     if not r.ok:
         print("NOTION ERROR:", r.status_code, r.text)
         return None
-    return r
-
-
-def discogs_request(url):
-    r = requests.get(url, headers=headers_discogs)
-    if not r.ok:
-        print("DISCOGS ERROR:", r.status_code, r.text)
-        return None
-    time.sleep(1.1)
     return r
 
 
@@ -76,7 +94,7 @@ def parse_formats(formats):
 
 
 # ---------------------------------------------------
-# DISCOGS FETCHERS
+# PHASE 1 — FETCH COLLECTION
 # ---------------------------------------------------
 
 def get_full_collection():
@@ -94,35 +112,9 @@ def get_full_collection():
 
         if page >= data.get("pagination", {}).get("pages", 1):
             break
-
         page += 1
 
     return releases
-
-
-def get_release_details(release_id):
-    r = discogs_request(f"{DISCOGS_BASE}/releases/{release_id}")
-    return r.json() if r else {}
-
-
-def get_market_stats(release_id):
-    lowest = median = highest = None
-
-    r_stats = discogs_request(f"{DISCOGS_BASE}/marketplace/stats/{release_id}")
-    if r_stats:
-        lp = r_stats.json().get("lowest_price")
-        if lp:
-            lowest = lp.get("value")
-
-    r_price = discogs_request(f"{DISCOGS_BASE}/marketplace/price_suggestions/{release_id}")
-    if r_price:
-        data = r_price.json()
-        if data.get("Very Good Plus (VG+)"):
-            median = data["Very Good Plus (VG+)"]["value"]
-        if data.get("Mint (M)"):
-            highest = data["Mint (M)"]["value"]
-
-    return lowest, median, highest
 
 
 def get_folder_map():
@@ -139,32 +131,6 @@ def get_collection_fields():
 # NOTION HELPERS
 # ---------------------------------------------------
 
-def fetch_select_options(property_name):
-    r = notion_request("GET", f"{NOTION_BASE}/databases/{DATABASE_ID}")
-    if not r:
-        return set()
-    db = r.json()
-    return set(o["name"] for o in db["properties"][property_name]["select"]["options"])
-
-
-def update_select_schema(property_name, new_value, existing):
-    if new_value in existing:
-        return existing
-
-    existing.add(new_value)
-    payload = {
-        "properties": {
-            property_name: {
-                "select": {
-                    "options": [{"name": name} for name in existing]
-                }
-            }
-        }
-    }
-    notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
-    return existing
-
-
 def fetch_existing_pages():
     pages = {}
     r = notion_request("POST", f"{NOTION_BASE}/databases/{DATABASE_ID}/query", {"page_size": 100})
@@ -179,131 +145,204 @@ def fetch_existing_pages():
     return pages
 
 
+def fetch_schema():
+    r = notion_request("GET", f"{NOTION_BASE}/databases/{DATABASE_ID}")
+    return r.json() if r else {}
+
+
+def update_schema_multi_select(property_name, values):
+    payload = {
+        "properties": {
+            property_name: {
+                "multi_select": {
+                    "options": [{"name": v} for v in sorted(values)]
+                }
+            }
+        }
+    }
+    notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
+
+
+def update_schema_select(property_name, values):
+    payload = {
+        "properties": {
+            property_name: {
+                "select": {
+                    "options": [{"name": v} for v in sorted(values)]
+                }
+            }
+        }
+    }
+    notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
+
+
 # ---------------------------------------------------
 # MAIN
 # ---------------------------------------------------
 
 def main():
 
-    print("Fetching collection...")
+    print("Phase 1 — Fetching collection")
     collection = get_full_collection()
-    print("Total releases:", len(collection))
+    print("Total releases identified:", len(collection))
 
     folder_map = get_folder_map()
     field_map = get_collection_fields()
-    notion_pages = fetch_existing_pages()
 
-    select_fields = [
-        "Folder", "Media Condition", "Sleeve Condition",
-        "Genre", "Style", "Country", "FormatSpeed", "FormatSize"
-    ]
+    unique_selects = defaultdict(set)
+    processed_items = []
 
-    select_options = {field: fetch_select_options(field) for field in select_fields}
-
-    created = updated = failed = 0
+    # -------------------------------
+    # SCAN & COLLECT UNIQUE VALUES
+    # -------------------------------
 
     for item in collection:
-        try:
-            release_id = item["basic_information"]["id"]
-            instance_id = item["instance_id"]
 
-            folder = folder_map.get(item.get("folder_id"))
-            date_added = item.get("date_added")
+        basic = item["basic_information"]
+        release_id = basic["id"]
+        instance_id = item["instance_id"]
 
-            media = sleeve = None
-            true_notes = []
+        folder = folder_map.get(item.get("folder_id"))
+        date_added = item.get("date_added")
 
-            for n in item.get("notes", []):
-                field_name = field_map.get(n.get("field_id"))
-                value = n.get("value")
-                if not value:
-                    continue
-                if field_name == "Media Condition":
-                    media = value
-                elif field_name == "Sleeve Condition":
-                    sleeve = value
-                else:
-                    true_notes.append(value)
+        media = sleeve = None
+        true_notes = []
 
-            notes = "\n".join(true_notes) if true_notes else None
-
-            full = get_release_details(release_id)
-            lowest, median, highest = get_market_stats(release_id)
-
-            genres = full.get("genres") or []
-            styles = full.get("styles") or []
-            labels = full.get("labels") or []
-
-            genre = genres[0] if genres else None
-            style = styles[0] if styles else None
-            country = full.get("country")
-            catno = labels[0].get("catno") if labels else ""
-
-            size, speed, details = parse_formats(full.get("formats"))
-
-            # Auto-create select options
-            for field, value in [
-                ("Folder", folder),
-                ("Media Condition", media),
-                ("Sleeve Condition", sleeve),
-                ("Genre", genre),
-                ("Style", style),
-                ("Country", country),
-                ("FormatSpeed", speed),
-                ("FormatSize", size),
-            ]:
-                if value:
-                    select_options[field] = update_select_schema(
-                        field, value, select_options[field]
-                    )
-
-            properties = {
-                "Title": {"title": [{"text": {"content": full.get("title", "")}}]},
-                "Artist": {"rich_text": [{"text": {"content": ", ".join(a["name"] for a in full.get("artists", []))}}]},
-                "Discogs ID": {"number": release_id},
-                "Instance ID": {"number": instance_id},
-                "Year": {"number": full.get("year")},
-                "Label": {"rich_text": [{"text": {"content": ", ".join(l["name"] for l in labels)}}]},
-                "CatNo": {"rich_text": [{"text": {"content": catno}}]},
-                "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
-                "Added": {"date": {"start": date_added}},
-                "ValueLow": {"number": lowest},
-                "ValueMed": {"number": median},
-                "ValueHigh": {"number": highest},
-                "Notes": {"rich_text": [{"text": {"content": notes}}]} if notes else None,
-                "Folder": {"select": {"name": folder}} if folder else None,
-                "Media Condition": {"select": {"name": media}} if media else None,
-                "Sleeve Condition": {"select": {"name": sleeve}} if sleeve else None,
-                "Genre": {"select": {"name": genre}} if genre else None,
-                "Style": {"select": {"name": style}} if style else None,
-                "Country": {"select": {"name": country}} if country else None,
-                "FormatSpeed": {"select": {"name": speed}} if speed else None,
-                "FormatSize": {"select": {"name": size}} if size else None,
-            }
-
-            properties = {k: v for k, v in properties.items() if v is not None}
-
-            if instance_id in notion_pages:
-                r = notion_request("PATCH", f"{NOTION_BASE}/pages/{notion_pages[instance_id]}", {"properties": properties})
-                if r:
-                    updated += 1
-                else:
-                    print(f"[Notion Update Failed] {instance_id}")
-                    failed += 1
+        for n in item.get("notes", []):
+            field_name = field_map.get(n.get("field_id"))
+            value = n.get("value")
+            if not value:
+                continue
+            if field_name == "Media Condition":
+                media = value
+            elif field_name == "Sleeve Condition":
+                sleeve = value
             else:
-                r = notion_request("POST", f"{NOTION_BASE}/pages", {
+                true_notes.append(value)
+
+        notes = "\n".join(true_notes) if true_notes else None
+
+        genres = basic.get("genres") or []
+        styles = basic.get("styles") or []
+        labels = basic.get("labels") or []
+
+        genre_values = genres
+        style_values = styles
+
+        country = basic.get("country")
+        catno = labels[0].get("catno") if labels else ""
+
+        size, speed, details = parse_formats(basic.get("formats"))
+
+        # Collect unique select values
+        for field, value in [
+            ("Folder", folder),
+            ("Media Condition", media),
+            ("Sleeve Condition", sleeve),
+            ("Country", country),
+            ("FormatSpeed", speed),
+            ("FormatSize", size),
+        ]:
+            if value:
+                unique_selects[field].add(value)
+
+        for g in genre_values:
+            unique_selects["Genre"].add(g)
+
+        for s in style_values:
+            unique_selects["Style"].add(s)
+
+        processed_items.append({
+            "release_id": release_id,
+            "instance_id": instance_id,
+            "title": basic.get("title"),
+            "artist": ", ".join(a["name"] for a in basic.get("artists", [])),
+            "year": basic.get("year"),
+            "label": ", ".join(l["name"] for l in labels),
+            "catno": catno,
+            "genres": genre_values,
+            "styles": style_values,
+            "country": country,
+            "folder": folder,
+            "media": media,
+            "sleeve": sleeve,
+            "size": size,
+            "speed": speed,
+            "details": details,
+            "notes": notes,
+            "added": date_added
+        })
+
+    # -------------------------------
+    # PHASE 2 — SYNC SCHEMA
+    # -------------------------------
+
+    print("Phase 2 — Syncing schema")
+
+    for field in ["Folder", "Media Condition", "Sleeve Condition",
+                  "Country", "FormatSpeed", "FormatSize"]:
+        update_schema_select(field, unique_selects[field])
+
+    update_schema_multi_select("Genre", unique_selects["Genre"])
+    update_schema_multi_select("Style", unique_selects["Style"])
+
+    # -------------------------------
+    # PHASE 3 — WRITE PAGES
+    # -------------------------------
+
+    print("Phase 3 — Writing pages")
+
+    notion_pages = fetch_existing_pages()
+    created = updated = failed = 0
+
+    for item in processed_items:
+
+        properties = {
+            "Title": {"title": [{"text": {"content": item["title"] or ""}}]},
+            "Artist": {"rich_text": [{"text": {"content": item["artist"] or ""}}]},
+            "Discogs ID": {"number": item["release_id"]},
+            "Instance ID": {"number": item["instance_id"]},
+            "Year": {"number": item["year"]},
+            "Label": {"rich_text": [{"text": {"content": item["label"] or ""}}]},
+            "CatNo": {"rich_text": [{"text": {"content": item["catno"] or ""}}]},
+            "FormatDetails": {"rich_text": [{"text": {"content": item["details"] or ""}}]},
+            "Added": {"date": {"start": item["added"]}},
+            "Notes": {"rich_text": [{"text": {"content": item["notes"]}}]} if item["notes"] else None,
+            "Folder": {"select": {"name": item["folder"]}} if item["folder"] else None,
+            "Media Condition": {"select": {"name": item["media"]}} if item["media"] else None,
+            "Sleeve Condition": {"select": {"name": item["sleeve"]}} if item["sleeve"] else None,
+            "Country": {"select": {"name": item["country"]}} if item["country"] else None,
+            "FormatSpeed": {"select": {"name": item["speed"]}} if item["speed"] else None,
+            "FormatSize": {"select": {"name": item["size"]}} if item["size"] else None,
+            "Genre": {"multi_select": [{"name": g} for g in item["genres"]]},
+            "Style": {"multi_select": [{"name": s} for s in item["styles"]]},
+        }
+
+        properties = {k: v for k, v in properties.items() if v is not None}
+
+        if item["instance_id"] in notion_pages:
+            r = notion_request(
+                "PATCH",
+                f"{NOTION_BASE}/pages/{notion_pages[item['instance_id']]}",
+                {"properties": properties}
+            )
+            if r:
+                updated += 1
+            else:
+                failed += 1
+        else:
+            r = notion_request(
+                "POST",
+                f"{NOTION_BASE}/pages",
+                {
                     "parent": {"database_id": DATABASE_ID},
                     "properties": properties
-                })
-                if r:
-                    created += 1
-                else:
-                    print(f"[Notion Create Failed] {instance_id}")
-                    failed += 1
-
-        except Exception as e:
-            print(f"[Release ERROR] Instance {instance_id}: {e}")
-            failed += 1
+                }
+            )
+            if r:
+                created += 1
+            else:
+                failed += 1
 
     print("Sync complete.")
     print("Created:", created)
