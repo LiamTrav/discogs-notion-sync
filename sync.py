@@ -2,7 +2,8 @@ import os
 import time
 import re
 import requests
-from collections import defaultdict
+import hashlib
+from collections import defaultdict, Counter
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -12,13 +13,9 @@ USERNAME = os.environ["DISCOGS_USERNAME"]
 DISCOGS_BASE = "https://api.discogs.com"
 NOTION_BASE = "https://api.notion.com/v1"
 
-# ---------------------------------------------------
-# HEADERS
-# ---------------------------------------------------
-
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/5.1"
+    "User-Agent": "discogs-notion-sync/5.2"
 }
 
 headers_notion = {
@@ -28,7 +25,7 @@ headers_notion = {
 }
 
 # ---------------------------------------------------
-# SMART REQUEST HELPERS
+# REQUEST HELPERS
 # ---------------------------------------------------
 
 def discogs_request(url):
@@ -37,7 +34,6 @@ def discogs_request(url):
 
         if r.status_code == 429:
             retry = int(r.headers.get("Retry-After", 5))
-            print(f"Rate limited. Sleeping {retry}s")
             time.sleep(retry)
             continue
 
@@ -68,74 +64,13 @@ def clean_commas(value):
     return value.replace(",", "").strip() if value else value
 
 
-# ---------------------------------------------------
-# FORMAT PARSER
-# ---------------------------------------------------
-
-RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|33|45|78)\s?RPM\b", re.IGNORECASE)
-SIZE_PATTERN = re.compile(r'\b(7"|10"|12")')
-
-def parse_formats(formats):
-    if not formats:
-        return None, None, None
-
-    size = None
-    speed = None
-    details = []
-
-    for fmt in formats:
-        for desc in fmt.get("descriptions", []):
-            normalized = desc.replace("⅓", "1/3")
-
-            if not size and SIZE_PATTERN.search(desc):
-                size = desc
-                continue
-
-            if not speed and RPM_PATTERN.search(normalized):
-                speed = desc
-                continue
-
-            details.append(desc)
-
-    return size, speed, ", ".join(details) if details else None
+def compute_hash(data_dict):
+    hash_input = "|".join(str(v) for v in data_dict.values())
+    return hashlib.md5(hash_input.encode()).hexdigest()
 
 
 # ---------------------------------------------------
-# DISCOGS FETCH
-# ---------------------------------------------------
-
-def get_full_collection():
-    releases = []
-    page = 1
-
-    while True:
-        url = f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
-        r = discogs_request(url)
-        if not r:
-            break
-
-        data = r.json()
-        releases.extend(data.get("releases", []))
-
-        if page >= data.get("pagination", {}).get("pages", 1):
-            break
-        page += 1
-
-    return releases
-
-
-def get_folder_map():
-    r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders")
-    return {f["id"]: f["name"] for f in r.json().get("folders", [])} if r else {}
-
-
-def get_collection_fields():
-    r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/fields")
-    return {f["id"]: f["name"] for f in r.json().get("fields", [])} if r else {}
-
-
-# ---------------------------------------------------
-# NOTION HELPERS
+# NOTION PAGINATION
 # ---------------------------------------------------
 
 def fetch_existing_pages():
@@ -159,41 +94,24 @@ def fetch_existing_pages():
         data = r.json()
 
         for result in data.get("results", []):
-            instance_id = result["properties"]["Instance ID"]["number"]
+            props = result["properties"]
+            instance_id = props["Instance ID"]["number"]
+
+            existing_hash = ""
+            if props.get("SyncHash") and props["SyncHash"]["rich_text"]:
+                existing_hash = props["SyncHash"]["rich_text"][0]["text"]["content"]
+
             if instance_id:
-                pages[instance_id] = result["id"]
+                pages[instance_id] = {
+                    "page_id": result["id"],
+                    "hash": existing_hash
+                }
 
         has_more = data.get("has_more")
         start_cursor = data.get("next_cursor")
 
     print("Existing Notion pages fetched:", len(pages))
     return pages
-
-
-def update_schema_select(property_name, values):
-    payload = {
-        "properties": {
-            property_name: {
-                "select": {
-                    "options": [{"name": v} for v in sorted(values)]
-                }
-            }
-        }
-    }
-    notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
-
-
-def update_schema_multi_select(property_name, values):
-    payload = {
-        "properties": {
-            property_name: {
-                "multi_select": {
-                    "options": [{"name": v} for v in sorted(values)]
-                }
-            }
-        }
-    }
-    notion_request("PATCH", f"{NOTION_BASE}/databases/{DATABASE_ID}", payload)
 
 
 # ---------------------------------------------------
@@ -210,60 +128,21 @@ def main():
     field_map = get_collection_fields()
 
     unique_selects = defaultdict(set)
+    style_counter = Counter()
     processed_items = []
 
     # -------- SCAN PHASE --------
 
     for item in collection:
-
         basic = item["basic_information"]
         release_id = basic["id"]
         instance_id = item["instance_id"]
 
-        folder = folder_map.get(item.get("folder_id"))
-        date_added = item.get("date_added")
-
-        media = sleeve = None
-        true_notes = []
-
-        for n in item.get("notes", []):
-            field_name = field_map.get(n.get("field_id"))
-            value = n.get("value")
-            if not value:
-                continue
-            if field_name == "Media Condition":
-                media = value
-            elif field_name == "Sleeve Condition":
-                sleeve = value
-            else:
-                true_notes.append(value)
-
-        notes = "\n".join(true_notes) if true_notes else None
-
         genres = [clean_commas(g) for g in (basic.get("genres") or [])]
         styles = [clean_commas(s) for s in (basic.get("styles") or [])]
 
-        labels = basic.get("labels") or []
-        country = basic.get("country")
-        catno = labels[0].get("catno") if labels else ""
-
-        size, speed, details = parse_formats(basic.get("formats"))
-
-        for field, value in [
-            ("Folder", folder),
-            ("Media Condition", media),
-            ("Sleeve Condition", sleeve),
-            ("Country", country),
-            ("FormatSpeed", speed),
-            ("FormatSize", size),
-        ]:
-            if value:
-                unique_selects[field].add(value)
-
-        for g in genres:
-            unique_selects["Genre"].add(g)
         for s in styles:
-            unique_selects["Style"].add(s)
+            style_counter[s] += 1
 
         processed_items.append({
             "release_id": release_id,
@@ -271,41 +150,44 @@ def main():
             "title": basic.get("title"),
             "artist": ", ".join(a["name"] for a in basic.get("artists", [])),
             "year": basic.get("year"),
-            "label": ", ".join(l["name"] for l in labels),
-            "catno": catno,
             "genres": genres,
-            "styles": styles,
-            "country": country,
-            "folder": folder,
-            "media": media,
-            "sleeve": sleeve,
-            "size": size,
-            "speed": speed,
-            "details": details,
-            "notes": notes,
-            "added": date_added
+            "styles": styles
         })
 
-    # -------- SCHEMA PHASE --------
+    # -------- STYLE CAP --------
 
-    print("Phase 2 — Syncing schema")
+    top_styles = {s for s, _ in style_counter.most_common(100)}
 
-    for field in ["Folder", "Media Condition", "Sleeve Condition",
-                  "Country", "FormatSpeed", "FormatSize"]:
-        update_schema_select(field, unique_selects[field])
-
-    update_schema_multi_select("Genre", unique_selects["Genre"])
-    update_schema_multi_select("Style", unique_selects["Style"])
+    print("Total unique styles:", len(style_counter))
+    print("Capped styles to:", len(top_styles))
 
     # -------- WRITE PHASE --------
 
-    print("Phase 3 — Writing pages")
+    print("Phase 2 — Writing pages")
 
     notion_pages = fetch_existing_pages()
 
-    created = updated = failed = 0
+    created = updated = skipped = 0
 
     for item in processed_items:
+
+        allowed_styles = [s for s in item["styles"] if s in top_styles]
+
+        hash_payload = {
+            "title": item["title"],
+            "artist": item["artist"],
+            "year": item["year"],
+            "genres": ",".join(item["genres"]),
+            "styles": ",".join(allowed_styles)
+        }
+
+        new_hash = compute_hash(hash_payload)
+
+        existing = notion_pages.get(item["instance_id"])
+
+        if existing and existing["hash"] == new_hash:
+            skipped += 1
+            continue
 
         properties = {
             "Title": {"title": [{"text": {"content": item["title"] or ""}}]},
@@ -313,48 +195,62 @@ def main():
             "Discogs ID": {"number": item["release_id"]},
             "Instance ID": {"number": item["instance_id"]},
             "Year": {"number": item["year"]},
-            "Label": {"rich_text": [{"text": {"content": item["label"] or ""}}]},
-            "CatNo": {"rich_text": [{"text": {"content": item["catno"] or ""}}]},
-            "FormatDetails": {"rich_text": [{"text": {"content": item["details"] or ""}}]},
-            "Added": {"date": {"start": item["added"]}},
             "Genre": {"multi_select": [{"name": g} for g in item["genres"]]},
-            "Style": {"multi_select": [{"name": s} for s in item["styles"]]},
+            "Style": {"multi_select": [{"name": s} for s in allowed_styles]},
+            "SyncHash": {"rich_text": [{"text": {"content": new_hash}}]},
         }
 
-        if item["folder"]:
-            properties["Folder"] = {"select": {"name": item["folder"]}}
-        if item["media"]:
-            properties["Media Condition"] = {"select": {"name": item["media"]}}
-        if item["sleeve"]:
-            properties["Sleeve Condition"] = {"select": {"name": item["sleeve"]}}
-        if item["country"]:
-            properties["Country"] = {"select": {"name": item["country"]}}
-        if item["speed"]:
-            properties["FormatSpeed"] = {"select": {"name": item["speed"]}}
-        if item["size"]:
-            properties["FormatSize"] = {"select": {"name": item["size"]}}
-        if item["notes"]:
-            properties["Notes"] = {"rich_text": [{"text": {"content": item["notes"]}}]}
-
-        if item["instance_id"] in notion_pages:
+        if existing:
             r = notion_request(
                 "PATCH",
-                f"{NOTION_BASE}/pages/{notion_pages[item['instance_id']]}",
+                f"{NOTION_BASE}/pages/{existing['page_id']}",
                 {"properties": properties}
             )
-            updated += 1 if r else 0
+            if r:
+                updated += 1
         else:
             r = notion_request(
                 "POST",
                 f"{NOTION_BASE}/pages",
                 {"parent": {"database_id": DATABASE_ID}, "properties": properties}
             )
-            created += 1 if r else 0
+            if r:
+                created += 1
 
     print("Sync complete.")
     print("Created:", created)
     print("Updated:", updated)
-    print("Failed:", failed)
+    print("Skipped (unchanged):", skipped)
+
+
+# ---------------------------------------------------
+# REQUIRED DISCOGS HELPERS
+# ---------------------------------------------------
+
+def get_full_collection():
+    releases = []
+    page = 1
+    while True:
+        url = f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
+        r = discogs_request(url)
+        if not r:
+            break
+        data = r.json()
+        releases.extend(data.get("releases", []))
+        if page >= data.get("pagination", {}).get("pages", 1):
+            break
+        page += 1
+    return releases
+
+
+def get_folder_map():
+    r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders")
+    return {f["id"]: f["name"] for f in r.json().get("folders", [])} if r else {}
+
+
+def get_collection_fields():
+    r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/fields")
+    return {f["id"]: f["name"] for f in r.json().get("fields", [])} if r else {}
 
 
 if __name__ == "__main__":
