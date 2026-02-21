@@ -1,9 +1,8 @@
 import os
 import time
-import re
 import requests
 import hashlib
-from collections import defaultdict, Counter
+from collections import defaultdict
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -15,7 +14,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/5.2"
+    "User-Agent": "discogs-notion-sync/6.0"
 }
 
 headers_notion = {
@@ -60,13 +59,28 @@ def notion_request(method, url, payload=None):
 # UTIL
 # ---------------------------------------------------
 
-def clean_commas(value):
-    return value.replace(",", "").strip() if value else value
-
-
 def compute_hash(data_dict):
-    hash_input = "|".join(str(v) for v in data_dict.values())
+    hash_input = "|".join(str(v or "") for v in data_dict.values())
     return hashlib.md5(hash_input.encode()).hexdigest()
+
+
+def parse_formats(formats):
+    size = None
+    speed = None
+    details = []
+
+    for fmt in formats or []:
+        descriptions = fmt.get("descriptions", [])
+
+        for d in descriptions:
+            if 'RPM' in d:
+                speed = d
+            elif '"' in d:
+                size = d
+            else:
+                details.append(d)
+
+    return size, speed, ", ".join(details)
 
 
 # ---------------------------------------------------
@@ -88,6 +102,7 @@ def fetch_existing_pages():
             f"{NOTION_BASE}/databases/{DATABASE_ID}/query",
             payload
         )
+
         if not r:
             break
 
@@ -110,8 +125,37 @@ def fetch_existing_pages():
         has_more = data.get("has_more")
         start_cursor = data.get("next_cursor")
 
-    print("Existing Notion pages fetched:", len(pages))
     return pages
+
+
+# ---------------------------------------------------
+# DISCOGS HELPERS
+# ---------------------------------------------------
+
+def get_full_collection():
+    releases = []
+    page = 1
+
+    while True:
+        url = f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
+        r = discogs_request(url)
+        if not r:
+            break
+
+        data = r.json()
+        releases.extend(data.get("releases", []))
+
+        if page >= data.get("pagination", {}).get("pages", 1):
+            break
+
+        page += 1
+
+    return releases
+
+
+def get_folder_map():
+    r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders")
+    return {f["id"]: f["name"] for f in r.json().get("folders", [])} if r else {}
 
 
 # ---------------------------------------------------
@@ -120,85 +164,89 @@ def fetch_existing_pages():
 
 def main():
 
-    print("Phase 1 — Fetching collection")
+    print("Fetching Discogs collection...")
     collection = get_full_collection()
-    print("Total releases identified:", len(collection))
-
     folder_map = get_folder_map()
-    field_map = get_collection_fields()
-
-    unique_selects = defaultdict(set)
-    style_counter = Counter()
-    processed_items = []
-
-    # -------- SCAN PHASE --------
-
-    for item in collection:
-        basic = item["basic_information"]
-        release_id = basic["id"]
-        instance_id = item["instance_id"]
-
-        genres = [clean_commas(g) for g in (basic.get("genres") or [])]
-        styles = [clean_commas(s) for s in (basic.get("styles") or [])]
-
-        for s in styles:
-            style_counter[s] += 1
-
-        processed_items.append({
-            "release_id": release_id,
-            "instance_id": instance_id,
-            "title": basic.get("title"),
-            "artist": ", ".join(a["name"] for a in basic.get("artists", [])),
-            "year": basic.get("year"),
-            "genres": genres,
-            "styles": styles
-        })
-
-    # -------- STYLE CAP --------
-
-    top_styles = {s for s, _ in style_counter.most_common(100)}
-
-    print("Total unique styles:", len(style_counter))
-    print("Capped styles to:", len(top_styles))
-
-    # -------- WRITE PHASE --------
-
-    print("Phase 2 — Writing pages")
-
     notion_pages = fetch_existing_pages()
 
     created = updated = skipped = 0
 
-    for item in processed_items:
+    for item in collection:
 
-        allowed_styles = [s for s in item["styles"] if s in top_styles]
+        basic = item["basic_information"]
+        release_id = basic["id"]
+        instance_id = item["instance_id"]
+
+        title = basic.get("title")
+        artist = ", ".join(a["name"] for a in basic.get("artists", []))
+        year = basic.get("year")
+        country = basic.get("country")
+
+        label_data = basic.get("labels", [])
+        label = label_data[0]["name"] if label_data else None
+        catno = label_data[0]["catno"] if label_data else None
+
+        genres = basic.get("genres") or []
+        styles = basic.get("styles") or []
+
+        size, speed, details = parse_formats(basic.get("formats"))
+
+        folder_name = folder_map.get(item.get("folder_id"))
+        notes = item.get("notes")
+        media_condition = item.get("media_condition")
+        sleeve_condition = item.get("sleeve_condition")
+        date_added = item.get("date_added")
 
         hash_payload = {
-            "title": item["title"],
-            "artist": item["artist"],
-            "year": item["year"],
-            "genres": ",".join(item["genres"]),
-            "styles": ",".join(allowed_styles)
+            "title": title,
+            "artist": artist,
+            "year": year,
+            "label": label,
+            "catno": catno,
+            "country": country,
+            "folder": folder_name,
+            "notes": notes,
+            "media_condition": media_condition,
+            "sleeve_condition": sleeve_condition,
+            "date_added": date_added,
+            "formatsize": size,
+            "formatspeed": speed,
+            "formatdetails": details,
+            "genres": ",".join(genres),
+            "styles": ",".join(styles),
         }
 
         new_hash = compute_hash(hash_payload)
-
-        existing = notion_pages.get(item["instance_id"])
+        existing = notion_pages.get(instance_id)
 
         if existing and existing["hash"] == new_hash:
             skipped += 1
             continue
 
         properties = {
-            "Title": {"title": [{"text": {"content": item["title"] or ""}}]},
-            "Artist": {"rich_text": [{"text": {"content": item["artist"] or ""}}]},
-            "Discogs ID": {"number": item["release_id"]},
-            "Instance ID": {"number": item["instance_id"]},
-            "Year": {"number": item["year"]},
-            "Genre": {"multi_select": [{"name": g} for g in item["genres"]]},
-            "Style": {"multi_select": [{"name": s} for s in allowed_styles]},
+            "Title": {"title": [{"text": {"content": title or ""}}]},
+            "Artist": {"rich_text": [{"text": {"content": artist or ""}}]},
+            "Discogs ID": {"number": release_id},
+            "Instance ID": {"number": instance_id},
+            "Year": {"number": year},
+            "Label": {"rich_text": [{"text": {"content": label or ""}}]},
+            "CatNo": {"rich_text": [{"text": {"content": catno or ""}}]},
+            "Country": {"select": {"name": country}} if country else None,
+            "Folder": {"select": {"name": folder_name}} if folder_name else None,
+            "Notes": {"rich_text": [{"text": {"content": notes or ""}}]},
+            "Media Condition": {"select": {"name": media_condition}} if media_condition else None,
+            "Sleeve Condition": {"select": {"name": sleeve_condition}} if sleeve_condition else None,
+            "Added": {"date": {"start": date_added}} if date_added else None,
+            "FormatSize": {"select": {"name": size}} if size else None,
+            "FormatSpeed": {"select": {"name": speed}} if speed else None,
+            "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
+            "Genre": {"multi_select": [{"name": g} for g in genres]},
+            "Style": {"multi_select": [{"name": s} for s in styles]},
             "SyncHash": {"rich_text": [{"text": {"content": new_hash}}]},
         }
+
+        # Remove None properties
+        properties = {k: v for k, v in properties.items() if v is not None}
 
         if existing:
             r = notion_request(
@@ -220,37 +268,7 @@ def main():
     print("Sync complete.")
     print("Created:", created)
     print("Updated:", updated)
-    print("Skipped (unchanged):", skipped)
-
-
-# ---------------------------------------------------
-# REQUIRED DISCOGS HELPERS
-# ---------------------------------------------------
-
-def get_full_collection():
-    releases = []
-    page = 1
-    while True:
-        url = f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders/0/releases?page={page}&per_page=100"
-        r = discogs_request(url)
-        if not r:
-            break
-        data = r.json()
-        releases.extend(data.get("releases", []))
-        if page >= data.get("pagination", {}).get("pages", 1):
-            break
-        page += 1
-    return releases
-
-
-def get_folder_map():
-    r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders")
-    return {f["id"]: f["name"] for f in r.json().get("folders", [])} if r else {}
-
-
-def get_collection_fields():
-    r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/fields")
-    return {f["id"]: f["name"] for f in r.json().get("fields", [])} if r else {}
+    print("Skipped:", skipped)
 
 
 if __name__ == "__main__":
