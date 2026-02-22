@@ -3,6 +3,7 @@ import time
 import re
 import requests
 import hashlib
+from collections import defaultdict
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -14,7 +15,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/7.0"
+    "User-Agent": "discogs-notion-sync/7.1"
 }
 
 headers_notion = {
@@ -24,7 +25,7 @@ headers_notion = {
 }
 
 # ---------------------------------------------------
-# REQUEST HELPERS (SMART RATE LIMIT)
+# REQUEST HELPERS
 # ---------------------------------------------------
 
 def discogs_request(url):
@@ -36,12 +37,13 @@ def discogs_request(url):
             time.sleep(retry)
             continue
 
-        remaining = r.headers.get("X-Discogs-Ratelimit-Remaining")
-        if remaining and int(remaining) < 3:
-            time.sleep(5)
+        if r.status_code >= 500:
+            print(f"DISCOGS ERROR {r.status_code} for {url}")
+            time.sleep(2)
+            return None
 
         if not r.ok:
-            print("DISCOGS ERROR:", r.status_code, r.text)
+            print(f"DISCOGS ERROR {r.status_code} for {url}")
             return None
 
         return r
@@ -94,7 +96,7 @@ def compute_hash(d):
     return hashlib.md5("|".join(str(v or "") for v in d.values()).encode()).hexdigest()
 
 # ---------------------------------------------------
-# DISCOGS FETCHERS
+# DISCOGS FETCH
 # ---------------------------------------------------
 
 def get_full_collection():
@@ -111,6 +113,13 @@ def get_full_collection():
             break
         page += 1
     return releases
+
+
+def get_release_country(release_id):
+    r = discogs_request(f"{DISCOGS_BASE}/releases/{release_id}")
+    if r:
+        return r.json().get("country")
+    return None
 
 
 def get_market_values(release_id):
@@ -197,6 +206,13 @@ def main():
     folder_map = get_folder_map()
     field_map = get_collection_fields()
 
+    # Build label counts
+    label_counts = defaultdict(int)
+    for item in collection:
+        labels = item["basic_information"].get("labels") or []
+        if labels:
+            label_counts[labels[0]["name"]] += 1
+
     print("Phase 2 — Fetching Notion pages")
     notion_pages = fetch_existing_pages()
 
@@ -237,13 +253,20 @@ def main():
 
         size, speed, details = parse_formats(basic.get("formats"))
 
+        # Country fallback
+        country = basic.get("country")
+        if not country:
+            country = get_release_country(release_id)
+
+        label_count = label_counts.get(label, 0)
+
         metadata_hash_payload = {
             "title": basic.get("title"),
             "artist": ", ".join(a["name"] for a in basic.get("artists", [])),
             "year": basic.get("year"),
             "label": label,
             "catno": catno,
-            "country": basic.get("country"),
+            "country": country,
             "folder": folder,
             "media": media,
             "sleeve": sleeve,
@@ -253,6 +276,7 @@ def main():
             "details": details,
             "genres": ",".join(genres),
             "styles": ",".join(styles),
+            "label_count": label_count
         }
 
         new_hash = compute_hash(metadata_hash_payload)
@@ -262,7 +286,6 @@ def main():
             skipped += 1
             continue
 
-        # Phase 3 — Marketplace only if needed
         lowest, median, highest = get_market_values(release_id)
 
         properties = {
@@ -272,8 +295,9 @@ def main():
             "Instance ID": {"number": instance_id},
             "Year": {"number": basic.get("year")},
             "Label": {"rich_text": [{"text": {"content": label or ""}}]},
+            "LabelCount": {"number": label_count},
             "CatNo": {"rich_text": [{"text": {"content": catno or ""}}]},
-            "Country": {"select": {"name": basic.get("country")}} if basic.get("country") else None,
+            "Country": {"select": {"name": country}} if country else None,
             "Folder": {"select": {"name": folder}} if folder else None,
             "Media Condition": {"select": {"name": media}} if media else None,
             "Sleeve Condition": {"select": {"name": sleeve}} if sleeve else None,
