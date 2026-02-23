@@ -15,7 +15,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/7.1"
+    "User-Agent": "discogs-notion-sync/7.2"
 }
 
 headers_notion = {
@@ -56,12 +56,14 @@ def notion_request(method, url, payload=None):
         return None
     return r
 
+
 # ---------------------------------------------------
 # UTIL
 # ---------------------------------------------------
 
 RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|33|45|78)\s?RPM\b", re.IGNORECASE)
 SIZE_PATTERN = re.compile(r'\b(7"|10"|12")')
+
 
 def parse_formats(formats):
     if not formats:
@@ -94,6 +96,7 @@ def clean_multiselect(value):
 
 def compute_hash(d):
     return hashlib.md5("|".join(str(v or "") for v in d.values()).encode()).hexdigest()
+
 
 # ---------------------------------------------------
 # DISCOGS FETCH
@@ -151,6 +154,7 @@ def get_collection_fields():
     r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/fields")
     return {f["id"]: f["name"] for f in r.json().get("fields", [])} if r else {}
 
+
 # ---------------------------------------------------
 # NOTION PAGINATION
 # ---------------------------------------------------
@@ -195,6 +199,7 @@ def fetch_existing_pages():
 
     return pages
 
+
 # ---------------------------------------------------
 # MAIN
 # ---------------------------------------------------
@@ -206,12 +211,22 @@ def main():
     folder_map = get_folder_map()
     field_map = get_collection_fields()
 
+    # ----------------------------
     # Build label counts
+    # ----------------------------
     label_counts = defaultdict(int)
     for item in collection:
         labels = item["basic_information"].get("labels") or []
         if labels:
             label_counts[labels[0]["name"]] += 1
+
+    # ----------------------------
+    # Build release counts (Qty)
+    # ----------------------------
+    release_counts = defaultdict(int)
+    for item in collection:
+        release_id = item["basic_information"]["id"]
+        release_counts[release_id] += 1
 
     print("Phase 2 — Fetching Notion pages")
     notion_pages = fetch_existing_pages()
@@ -223,6 +238,8 @@ def main():
         basic = item["basic_information"]
         release_id = basic["id"]
         instance_id = item["instance_id"]
+
+        qty = release_counts.get(release_id, 0)
 
         folder = folder_map.get(item.get("folder_id"))
         date_added = item.get("date_added")
@@ -253,7 +270,6 @@ def main():
 
         size, speed, details = parse_formats(basic.get("formats"))
 
-        # Country fallback
         country = basic.get("country")
         if not country:
             country = get_release_country(release_id)
@@ -276,7 +292,8 @@ def main():
             "details": details,
             "genres": ",".join(genres),
             "styles": ",".join(styles),
-            "label_count": label_count
+            "label_count": label_count,
+            "qty": qty
         }
 
         new_hash = compute_hash(metadata_hash_payload)
@@ -296,6 +313,7 @@ def main():
             "Year": {"number": basic.get("year")},
             "Label": {"rich_text": [{"text": {"content": label or ""}}]},
             "LabelCount": {"number": label_count},
+            "Qty": {"number": qty},
             "CatNo": {"rich_text": [{"text": {"content": catno or ""}}]},
             "Country": {"select": {"name": country}} if country else None,
             "Folder": {"select": {"name": folder}} if folder else None,
