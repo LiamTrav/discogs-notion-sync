@@ -1,0 +1,28 @@
+name: Discogs Value Sync
+
+on:
+  schedule:
+    - cron: '0 3 */7 * *'   # every 7 days at 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  run-value-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run value sync
+        env:
+          DISCOGS_TOKEN: ${{ secrets.DISCOGS_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python discogs_notion_value_sync.py
