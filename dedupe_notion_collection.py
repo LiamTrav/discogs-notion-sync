@@ -1,20 +1,4 @@
 import os
-        instance_id = instance_prop.get("number")
-
-        if instance_id is None:
-            skipped_missing_instance += 1
-            continue
-
-        grouped[instance_id].append({
-            "page_id": page["id"],
-            "created_time": page["created_time"],
-            "title": extract_title(props)
-        })
-
-    print(f"Unique Instance IDs: {len(grouped)}")
-    print(f"Skipped missing Instance IDs: {skipped_missing_instance}")
-
-    duplicate_groups = 0
     pages_to_delete = []
 
     for instance_id, items in grouped.items():
