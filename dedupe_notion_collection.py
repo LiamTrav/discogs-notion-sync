@@ -1,79 +1,79 @@
 import os
+import time
+import requests
+from collections import defaultdict
+from datetime import datetime
 
-    print(f"Unique Instance IDs: {len(grouped)}")
-    print(f"Skipped missing Instance IDs: {skipped_missing_instance}")
+NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 
-    duplicate_groups = 0
-    pages_to_delete = []
+NOTION_BASE = "https://api.notion.com/v1"
 
-    for instance_id, items in grouped.items():
+# ---------------------------------------------------
+# CONFIG
+# ---------------------------------------------------
 
-        if len(items) <= 1:
+DRY_RUN = True
+
+# ---------------------------------------------------
+# HEADERS
+# ---------------------------------------------------
+
+headers_notion = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Content-Type": "application/json",
+    "Notion-Version": "2022-06-28"
+}
+
+# ---------------------------------------------------
+# REQUEST HELPER
+# ---------------------------------------------------
+
+def notion_request(method, url, payload=None, retries=5):
+    for attempt in range(retries):
+        r = requests.request(method, url, headers=headers_notion, json=payload)
+
+        if r.status_code == 429:
+            retry = int(r.headers.get("Retry-After", 2))
+            print(f"Rate limited. Sleeping {retry}s")
+            time.sleep(retry)
             continue
 
-        duplicate_groups += 1
+        if r.status_code >= 500:
+            wait = 2 ** attempt
+            print(f"Notion server error {r.status_code}. Retrying in {wait}s")
+            time.sleep(wait)
+            continue
 
-        # oldest first
-        items_sorted = sorted(
-            items,
-            key=lambda x: x["created_time"]
-        )
+        if not r.ok:
+            print(f"NOTION ERROR {r.status_code}: {r.text}")
+            return None
 
-        keep = items_sorted[0]
-        delete = items_sorted[1:]
+        return r
 
-        print("\n--------------------------------------------------")
-        print(f"DUPLICATE INSTANCE ID: {instance_id}")
-        print(f"KEEP:   {keep['created_time']} | {keep['title']} | {keep['page_id']}")
-
-        for d in delete:
-            print(f"DELETE: {d['created_time']} | {d['title']} | {d['page_id']}")
-            pages_to_delete.append(d)
-
-    print("\n==================================================")
-    print(f"Duplicate groups found: {duplicate_groups}")
-    print(f"Pages to delete: {len(pages_to_delete)}")
-    print(f"DRY RUN MODE: {DRY_RUN}")
-    print("==================================================")
-
-    if DRY_RUN:
-        print("\nDry run complete. No pages deleted.")
-        return
-
-    deleted = 0
-
-    for item in pages_to_delete:
-
-        success = archive_page(item["page_id"])
-
-        if success:
-            deleted += 1
-            print(f"Archived: {item['page_id']}")
-        else:
-            print(f"FAILED: {item['page_id']}")
-
-        time.sleep(0.35)
-
-    print("\n==================================================")
-    print(f"Archived pages: {deleted}")
-    print("==================================================")
+    return None
 
 # ---------------------------------------------------
-# UTIL
+# FETCH ALL PAGES
 # ---------------------------------------------------
 
 
-def extract_title(props):
-    try:
-        title_prop = props["Title"]["title"]
-        if title_prop:
-            return title_prop[0]["plain_text"]
-    except:
-        pass
+def fetch_all_pages():
+    pages = []
 
-    return "Untitled"
+    has_more = True
+    start_cursor = None
 
-# ---------------------------------------------------
+    while has_more:
 
-if __name__ == "__main__":
+        payload = {
+            "page_size": 100
+        }
+
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        r = notion_request(
+            "POST",
+            f"{NOTION_BASE}/databases/{DATABASE_ID}/query",
     main()
