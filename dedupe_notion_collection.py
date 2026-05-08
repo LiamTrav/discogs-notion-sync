@@ -57,6 +57,95 @@ def notion_request(method, url, payload=None, retries=5):
 # FETCH ALL PAGES
 # ---------------------------------------------------
 
+
+def fetch_all_pages():
+    pages = []
+
+    has_more = True
+    start_cursor = None
+
+    while has_more:
+
+        payload = {
+            "page_size": 100
+        }
+
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        r = notion_request(
+            "POST",
+            f"{NOTION_BASE}/databases/{DATABASE_ID}/query",
+            payload
+        )
+
+        if not r:
+            raise Exception("Failed fetching Notion pages")
+
+        data = r.json()
+
+        batch = data.get("results", [])
+        pages.extend(batch)
+
+        print(f"Fetched {len(pages)} pages so far...")
+
+        has_more = data.get("has_more")
+        start_cursor = data.get("next_cursor")
+
+    return pages
+
+# ---------------------------------------------------
+# DELETE PAGE
+# ---------------------------------------------------
+
+
+def archive_page(page_id):
+    payload = {
+        "archived": True
+    }
+
+    r = notion_request(
+        "PATCH",
+        f"{NOTION_BASE}/pages/{page_id}",
+        payload
+    )
+
+    return bool(r)
+
+# ---------------------------------------------------
+# MAIN
+# ---------------------------------------------------
+
+
+def main():
+
+    print("Fetching all Notion pages...")
+    pages = fetch_all_pages()
+
+    print(f"Total pages fetched: {len(pages)}")
+
+    grouped = defaultdict(list)
+
+    skipped_missing_instance = 0
+
+    for page in pages:
+
+        props = page.get("properties", {})
+
+        instance_prop = props.get("Instance ID")
+
+        if not instance_prop:
+            skipped_missing_instance += 1
+            continue
+
+                instance_id = instance_prop.get("number")
+
+        if instance_id is None:
+            skipped_missing_instance += 1
+            continue
+
+        grouped[instance_id].append({
+            "page_id": page["id"],
             "created_time": page["created_time"],
             "title": extract_title(props)
         })
