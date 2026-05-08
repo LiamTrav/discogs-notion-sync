@@ -176,8 +176,8 @@ def fetch_existing_pages():
         )
 
         if not r:
-            break
-
+            raise Exception("Failed fetching Notion pages")
+            
         data = r.json()
 
         for result in data.get("results", []):
