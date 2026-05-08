@@ -1,4 +1,9 @@
 import os
+
+    print(f"Unique Instance IDs: {len(grouped)}")
+    print(f"Skipped missing Instance IDs: {skipped_missing_instance}")
+
+    duplicate_groups = 0
     pages_to_delete = []
 
     for instance_id, items in grouped.items():
