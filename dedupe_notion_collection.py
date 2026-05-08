@@ -13,7 +13,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 # CONFIG
 # ---------------------------------------------------
 
-DRY_RUN = True
+DRY_RUN = False
 
 # ---------------------------------------------------
 # HEADERS
