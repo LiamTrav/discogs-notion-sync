@@ -138,7 +138,7 @@ def main():
             skipped_missing_instance += 1
             continue
 
-                instance_id = instance_prop.get("number")
+        instance_id = instance_prop.get("number")
 
         if instance_id is None:
             skipped_missing_instance += 1
