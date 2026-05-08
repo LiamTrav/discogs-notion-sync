@@ -4,6 +4,7 @@ import re
 import requests
 import hashlib
 from collections import defaultdict
+from requests.exceptions import RequestException
 
 DISCOGS_TOKEN = os.environ["DISCOGS_TOKEN"]
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -48,14 +49,45 @@ def discogs_request(url):
 
         return r
 
+def notion_request(method, url, payload=None, retries=5):
+    for attempt in range(retries):
+        try:
+            r = requests.request(
+                method,
+                url,
+                headers=headers_notion,
+                json=payload,
+                timeout=30
+            )
 
-def notion_request(method, url, payload=None):
-    r = requests.request(method, url, headers=headers_notion, json=payload)
-    if not r.ok:
-        print("NOTION ERROR:", r.status_code, r.text)
-        return None
-    return r
+            # Rate limiting
+            if r.status_code == 429:
+                retry = int(r.headers.get("Retry-After", 2))
+                print(f"NOTION RATE LIMITED - Sleeping {retry}s")
+                time.sleep(retry)
+                continue
 
+            # Retry transient server failures
+            if r.status_code >= 500:
+                wait = 2 ** attempt
+                print(f"NOTION SERVER ERROR {r.status_code} - Retrying in {wait}s")
+                time.sleep(wait)
+                continue
+
+            # Fail immediately on permanent client errors
+            if not r.ok:
+                print(f"NOTION ERROR {r.status_code}: {r.text}")
+                return None
+
+            return r
+
+        except RequestException as e:
+            wait = 2 ** attempt
+            print(f"NOTION REQUEST EXCEPTION: {e} - Retrying in {wait}s")
+            time.sleep(wait)
+
+    print(f"NOTION REQUEST FAILED AFTER {retries} ATTEMPTS: {url}")
+    return None
 
 # ---------------------------------------------------
 # UTIL
@@ -63,7 +95,6 @@ def notion_request(method, url, payload=None):
 
 RPM_PATTERN = re.compile(r"\b(33\s?⅓|33\s?1/3|33|45|78)\s?RPM\b", re.IGNORECASE)
 SIZE_PATTERN = re.compile(r'\b(7"|10"|12")')
-
 
 def parse_formats(formats):
     if not formats:
@@ -89,14 +120,11 @@ def parse_formats(formats):
 
     return size, speed, ", ".join(details) if details else None
 
-
 def clean_multiselect(value):
     return value.replace(",", "").strip() if value else value
 
-
 def compute_hash(d):
     return hashlib.md5("|".join(str(v or "") for v in d.values()).encode()).hexdigest()
-
 
 # ---------------------------------------------------
 # DISCOGS FETCH
@@ -117,13 +145,11 @@ def get_full_collection():
         page += 1
     return releases
 
-
 def get_release_country(release_id):
     r = discogs_request(f"{DISCOGS_BASE}/releases/{release_id}")
     if r:
         return r.json().get("country")
     return None
-
 
 def get_market_values(release_id):
     lowest = median = highest = None
@@ -144,16 +170,13 @@ def get_market_values(release_id):
 
     return lowest, median, highest
 
-
 def get_folder_map():
     r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders")
     return {f["id"]: f["name"] for f in r.json().get("folders", [])} if r else {}
 
-
 def get_collection_fields():
     r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/fields")
     return {f["id"]: f["name"] for f in r.json().get("fields", [])} if r else {}
-
 
 # ---------------------------------------------------
 # NOTION PAGINATION
@@ -177,7 +200,7 @@ def fetch_existing_pages():
 
         if not r:
             raise Exception("Failed fetching Notion pages")
-            
+
         data = r.json()
 
         for result in data.get("results", []):
@@ -198,7 +221,6 @@ def fetch_existing_pages():
         start_cursor = data.get("next_cursor")
 
     return pages
-
 
 # ---------------------------------------------------
 # MAIN
@@ -355,7 +377,6 @@ def main():
     print("Created:", created)
     print("Updated:", updated)
     print("Skipped:", skipped)
-
 
 if __name__ == "__main__":
     main()
