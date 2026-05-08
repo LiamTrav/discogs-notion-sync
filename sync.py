@@ -26,6 +26,12 @@ headers_notion = {
 }
 
 # ---------------------------------------------------
+# SAFETY CONFIG
+# ---------------------------------------------------
+
+NOTION_INDEX_INTEGRITY_THRESHOLD = 0.95
+
+# ---------------------------------------------------
 # REQUEST HELPERS
 # ---------------------------------------------------
 
@@ -252,6 +258,24 @@ def main():
 
     print("Phase 2 — Fetching Notion pages")
     notion_pages = fetch_existing_pages()
+
+    # ----------------------------
+    # Pagination integrity validation
+    # ----------------------------
+    collection_count = len(collection)
+    notion_count = len(notion_pages)
+
+    print(f"Discogs collection count: {collection_count}")
+    print(f"Indexed Notion pages: {notion_count}")
+
+    minimum_expected = int(collection_count * NOTION_INDEX_INTEGRITY_THRESHOLD)
+
+    if notion_count < minimum_expected:
+        raise Exception(
+            f"Notion pagination integrity check failed. "
+            f"Expected at least {minimum_expected} indexed pages, "
+            f"got {notion_count}."
+        )
 
     created = updated = skipped = 0
 
