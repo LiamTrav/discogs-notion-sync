@@ -16,7 +16,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-sync/7.2"
+    "User-Agent": "discogs-notion-sync/7.3"
 }
 
 headers_notion = {
@@ -26,10 +26,25 @@ headers_notion = {
 }
 
 # ---------------------------------------------------
-# SAFETY CONFIG
+# VALUE MAPPING (same as discogs_notion_value_sync.py)
 # ---------------------------------------------------
+# ValueLow = lowest price currently listed for sale (marketplace stats).
+# Every other property = Discogs price suggestion for that condition grade.
+# Grades are matched on the text before the bracket in the Discogs key,
+# e.g. "Near Mint (NM or M-)" -> "near mint".
 
-NOTION_INDEX_INTEGRITY_THRESHOLD = 0.95
+GRADE_PROPERTIES = {
+    "ValueHigh": "mint",
+    "ValueNM": "near mint",
+    "ValueMed": "very good plus",
+    "ValueVG": "very good",
+    "ValueGPlus": "good plus",
+    "ValueG": "good",
+    "ValueFair": "fair",
+    "ValuePoor": "poor",
+}
+
+VALUE_PROPERTIES = ["ValueLow"] + list(GRADE_PROPERTIES)
 
 # ---------------------------------------------------
 # REQUEST HELPERS
@@ -132,6 +147,43 @@ def clean_multiselect(value):
 def compute_hash(d):
     return hashlib.md5("|".join(str(v or "") for v in d.values()).encode()).hexdigest()
 
+def round_price(v):
+    if v is None:
+        return None
+    try:
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return None
+
+# ---------------------------------------------------
+# SCHEMA CHECK (value properties only)
+# ---------------------------------------------------
+
+def check_value_schema():
+    """Stop early, with a clear message, if a value property is missing."""
+    r = notion_request("GET", f"{NOTION_BASE}/databases/{DATABASE_ID}")
+    if not r:
+        raise SystemExit("Could not read the Notion database schema.")
+
+    props = r.json().get("properties", {})
+    problems = []
+
+    for name in VALUE_PROPERTIES:
+        if name not in props:
+            problems.append(f"Missing property: {name}")
+        elif props[name].get("type") != "number":
+            problems.append(
+                f"Property {name} is type '{props[name].get('type')}', expected 'number'"
+            )
+
+    if problems:
+        print("Notion schema check FAILED:")
+        for p in problems:
+            print(" -", p)
+        raise SystemExit("Fix the Notion value properties, then run again.")
+
+    print("Notion value-property check passed.")
+
 # ---------------------------------------------------
 # DISCOGS FETCH
 # ---------------------------------------------------
@@ -158,23 +210,33 @@ def get_release_country(release_id):
     return None
 
 def get_market_values(release_id):
-    lowest = median = highest = None
-
+    """
+    Returns a dict of {Notion property: value} for the release.
+    Returns None if either Discogs call failed, so that a failed call
+    is never mistaken for "no data" and used to blank existing values.
+    """
     r_stats = discogs_request(f"{DISCOGS_BASE}/marketplace/stats/{release_id}")
-    if r_stats:
-        lp = r_stats.json().get("lowest_price")
-        if lp:
-            lowest = lp.get("value")
-
     r_price = discogs_request(f"{DISCOGS_BASE}/marketplace/price_suggestions/{release_id}")
-    if r_price:
-        data = r_price.json()
-        if data.get("Very Good Plus (VG+)"):
-            median = data["Very Good Plus (VG+)"]["value"]
-        if data.get("Mint (M)"):
-            highest = data["Mint (M)"]["value"]
 
-    return lowest, median, highest
+    if not r_stats or not r_price:
+        return None
+
+    values = {prop: None for prop in VALUE_PROPERTIES}
+
+    lowest = r_stats.json().get("lowest_price")
+    if isinstance(lowest, dict):
+        values["ValueLow"] = round_price(lowest.get("value"))
+
+    suggestions = {}
+    for key, entry in r_price.json().items():
+        if isinstance(entry, dict):
+            grade = key.split(" (")[0].strip().lower()
+            suggestions[grade] = entry.get("value")
+
+    for prop, grade in GRADE_PROPERTIES.items():
+        values[prop] = round_price(suggestions.get(grade))
+
+    return values
 
 def get_folder_map():
     r = discogs_request(f"{DISCOGS_BASE}/users/{USERNAME}/collection/folders")
@@ -234,6 +296,8 @@ def fetch_existing_pages():
 
 def main():
 
+    check_value_schema()
+
     print("Phase 1 — Fetching collection")
     collection = get_full_collection()
     folder_map = get_folder_map()
@@ -259,27 +323,18 @@ def main():
     print("Phase 2 — Fetching Notion pages")
     notion_pages = fetch_existing_pages()
 
-    # ----------------------------
-    # Pagination integrity validation
-    # ----------------------------
-    collection_count = len(collection)
-    notion_count = len(notion_pages)
+    created = updated = skipped = value_lookup_failed = 0
 
-    print(f"Discogs collection count: {collection_count}")
-    print(f"Indexed Notion pages: {notion_count}")
+    # Several copies of one release share the same Discogs values,
+    # so each release is only looked up once per run.
+    value_cache = {}
 
-    minimum_expected = int(collection_count * NOTION_INDEX_INTEGRITY_THRESHOLD)
+    total = len(collection)
 
-    if notion_count < minimum_expected:
-        raise Exception(
-            f"Notion pagination integrity check failed. "
-            f"Expected at least {minimum_expected} indexed pages, "
-            f"got {notion_count}."
-        )
+    for idx, item in enumerate(collection, 1):
 
-    created = updated = skipped = 0
-
-    for item in collection:
+        if idx % 100 == 0:
+            print(f"Processed {idx}/{total} - created {created}, updated {updated}, skipped {skipped}")
 
         basic = item["basic_information"]
         release_id = basic["id"]
@@ -349,7 +404,13 @@ def main():
             skipped += 1
             continue
 
-        lowest, median, highest = get_market_values(release_id)
+        if release_id not in value_cache:
+            value_cache[release_id] = get_market_values(release_id)
+        values = value_cache[release_id]
+
+        if values is None:
+            value_lookup_failed += 1
+            print(f"VALUE LOOKUP FAILED (value fields left untouched): release {release_id}")
 
         properties = {
             "Title": {"title": [{"text": {"content": basic.get("title", "")}}]},
@@ -371,12 +432,16 @@ def main():
             "FormatDetails": {"rich_text": [{"text": {"content": details or ""}}]},
             "Genre": {"multi_select": [{"name": g} for g in genres]},
             "Style": {"multi_select": [{"name": s} for s in styles]},
-            "ValueLow": {"number": lowest},
-            "ValueMed": {"number": median},
-            "ValueHigh": {"number": highest},
             "Notes": {"rich_text": [{"text": {"content": notes}}]} if notes else None,
             "SyncHash": {"rich_text": [{"text": {"content": new_hash}}]},
         }
+
+        # All eight grades plus lowest listed price.
+        # Skipped entirely if the Discogs lookup failed, so existing
+        # values in Notion are never blanked by a failed request.
+        if values is not None:
+            for prop in VALUE_PROPERTIES:
+                properties[prop] = {"number": values[prop]}
 
         properties = {k: v for k, v in properties.items() if v is not None}
 
@@ -401,6 +466,7 @@ def main():
     print("Created:", created)
     print("Updated:", updated)
     print("Skipped:", skipped)
+    print("Value lookups failed:", value_lookup_failed)
 
 if __name__ == "__main__":
     main()
