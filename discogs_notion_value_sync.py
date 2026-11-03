@@ -12,7 +12,7 @@ NOTION_BASE = "https://api.notion.com/v1"
 
 headers_discogs = {
     "Authorization": f"Discogs token={DISCOGS_TOKEN}",
-    "User-Agent": "discogs-notion-value-sync/2.0"
+    "User-Agent": "discogs-notion-value-sync/3.0"
 }
 
 headers_notion = {
@@ -24,24 +24,23 @@ headers_notion = {
 # ---------------------------------------------------
 # VALUE MAPPING
 # ---------------------------------------------------
-# ValueLow = lowest price currently listed for sale (marketplace stats).
-# Every other property = Discogs price suggestion for that condition grade.
-# Grades are matched on the text before the bracket in the Discogs key,
-# e.g. "Near Mint (NM or M-)" -> "near mint", so small label changes
-# on Discogs' side don't break the match.
+# Each property holds the Discogs price suggestion for that condition grade
+# (marketplace price_suggestions endpoint). Grades are matched on the text
+# before the bracket in the Discogs key, e.g. "Near Mint (NM or M-)" ->
+# "near mint", so small label changes on Discogs' side don't break the match.
 
 GRADE_PROPERTIES = {
-    "ValueHigh": "mint",
+    "ValueM": "mint",
     "ValueNM": "near mint",
-    "ValueMed": "very good plus",
+    "ValueVG+": "very good plus",
     "ValueVG": "very good",
-    "ValueGPlus": "good plus",
+    "ValueG+": "good plus",
     "ValueG": "good",
     "ValueFair": "fair",
     "ValuePoor": "poor",
 }
 
-VALUE_PROPERTIES = ["ValueLow"] + list(GRADE_PROPERTIES)
+VALUE_PROPERTIES = list(GRADE_PROPERTIES)
 
 # ---------------------------------------------------
 # REQUEST HELPERS
@@ -174,21 +173,15 @@ def round_price(v):
 
 def get_market_values(release_id):
     """
-    Returns a dict of {Notion property: value} for the release.
-    Returns None if either Discogs call failed, so that a failed call
-    is never mistaken for "no data" and used to blank existing values.
+    Returns a dict of {Notion property: value} for the release, one entry
+    per condition grade. Returns None if the Discogs call failed, so that
+    a failed call is never mistaken for "no data" and used to blank
+    existing values.
     """
-    r_stats = discogs_request(f"{DISCOGS_BASE}/marketplace/stats/{release_id}")
     r_price = discogs_request(f"{DISCOGS_BASE}/marketplace/price_suggestions/{release_id}")
 
-    if not r_stats or not r_price:
+    if not r_price:
         return None
-
-    values = {prop: None for prop in VALUE_PROPERTIES}
-
-    lowest = r_stats.json().get("lowest_price")
-    if isinstance(lowest, dict):
-        values["ValueLow"] = round_price(lowest.get("value"))
 
     suggestions = {}
     for key, entry in r_price.json().items():
@@ -196,10 +189,10 @@ def get_market_values(release_id):
             grade = key.split(" (")[0].strip().lower()
             suggestions[grade] = entry.get("value")
 
-    for prop, grade in GRADE_PROPERTIES.items():
-        values[prop] = round_price(suggestions.get(grade))
-
-    return values
+    return {
+        prop: round_price(suggestions.get(grade))
+        for prop, grade in GRADE_PROPERTIES.items()
+    }
 
 # ---------------------------------------------------
 # FETCH ALL NOTION PAGES
