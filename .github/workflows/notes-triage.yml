@@ -1,0 +1,33 @@
+name: Notes Triage (read-only)
+
+on:
+  workflow_dispatch:      # Manual only - never runs on a schedule
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run notes triage
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python -u notes_triage.py
+
+      - name: Attach CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notes-triage-csv
+          path: notes_triage.csv
