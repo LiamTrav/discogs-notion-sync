@@ -1,0 +1,32 @@
+name: Notes Apply (writes Keep and Private Notes to Notion)
+
+on:
+  workflow_dispatch:      # Manual only - never runs on a schedule
+    inputs:
+      dry_run:
+        description: "Dry run (show what would change, write nothing)"
+        type: boolean
+        default: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run notes apply
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python -u notes_apply.py

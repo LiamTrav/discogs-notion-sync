@@ -1,0 +1,46 @@
+name: Notes Clean (updates Notes on Discogs and Notion)
+
+on:
+  workflow_dispatch:      # Manual only - never runs on a schedule
+    inputs:
+      dry_run:
+        description: "Dry run (show what would change, write nothing)"
+        type: boolean
+        default: true
+      max_writes:
+        description: "Max records to change this run (0 = no limit). Use 5 for a pilot."
+        type: string
+        default: "5"
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run notes clean
+        env:
+          DISCOGS_TOKEN: ${{ secrets.DISCOGS_TOKEN }}
+          DISCOGS_USERNAME: ${{ secrets.DISCOGS_USERNAME }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_WRITES: ${{ inputs.max_writes }}
+        run: python -u notes_clean_discogs.py
+
+      - name: Attach backup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notes-backup-csv
+          path: notes_backup.csv
