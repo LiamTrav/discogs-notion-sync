@@ -7,7 +7,9 @@ split into:
   - Private     (the play lines)
   - Public      (everything else, suitable for the Discogs listing comments)
   - Review      (notes about your copy differing from the linked release,
-                 e.g. 'Not this version', 'My version has...')
+                 e.g. 'Not this version', 'My version has...').
+                 For these, Notes are LEFT UNCHANGED and Private Notes would
+                 simply be set to 'REVIEW' so you can filter on it in Notion.
 
 This script contains NO code that writes to Notion or Discogs. It only reads,
 prints a report, and saves notes_triage.csv for you to open in a spreadsheet.
@@ -162,8 +164,8 @@ def main():
 
         if version:
             category = "REVIEW (copy differs from linked release)"
-            proposed_private = "\n".join(play)
-            proposed_public = ""
+            proposed_private = "REVIEW"  # marker only, so you can filter on it in Notion
+            proposed_public = notes      # Notes are left exactly as they are
         elif keep and public:
             category = "KEEP + public text remains"
             proposed_private = "\n".join(play)
